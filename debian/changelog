@@ -1,0 +1,5 @@
+wal-e (0.1-1ppa1ubuntu1) lucid; urgency=low
+
+  * Debianize
+
+ -- Daniel Farina <daniel@heroku.com>  Wed, 16 Mar 2011 15:20:12 -0700
