@@ -1,3 +1,11 @@
+wal-e (0.2-1ppa1ubuntu1) lucid; urgency=low
+
+  * Implement tar-based volumes
+  * Fix some silly crash bugs
+  * Minor style changes: no known semantic alteration
+
+ -- Daniel Farina <daniel@heroku.com>  Fri, 18 Mar 2011 02:41:21 -0700
+
 wal-e (0.1-1ppa1ubuntu2) lucid; urgency=low
 
   * Add s3cmd to depends list
