@@ -11,6 +11,8 @@ import contextlib
 import copy
 import csv
 import datetime
+import errno
+import glob
 import multiprocessing
 import os
 import re
@@ -30,6 +32,27 @@ FILE_STRUCTURE_VERSION = '003'
 PSQL_BIN = 'psql'
 LZOP_BIN = 'lzop'
 S3CMD_BIN = 's3cmd'
+
+
+class UTC(datetime.tzinfo):
+    """
+    UTC timezone
+
+    Adapted from a Python example
+
+    """
+
+    ZERO = datetime.timedelta(0)
+    HOUR = datetime.timedelta(hours=1)
+
+    def utcoffset(self, dt):
+        return self.ZERO
+
+    def tzname(self, dt):
+        return "UTC"
+
+    def dst(self, dt):
+        return self.ZERO
 
 
 def subprocess_setup(f=None):
@@ -177,7 +200,13 @@ class PgBackupStatements(object):
             assert popen.returncode != 0
             raise Exception('Could not start hot backup')
 
-        label = 'freeze_start_' + datetime.datetime.now().isoformat()
+
+        # The difficulty of getting a timezone-stamped, UTC,
+        # ISO-formatted datetime is downright embarrassing.
+        #
+        # See http://bugs.python.org/issue5094
+        label = 'freeze_start_' + (datetime.datetime.utcnow()
+                                   .replace(tzinfo=UTC()).isoformat())
 
         return cls._dict_transform(psql_csv_run(
                 "SELECT file_name, "
@@ -258,15 +287,12 @@ def do_partition_put(backup_s3_prefix, tpart_number, tpart, s3cmd_config_path):
 
     """
     with tempfile.NamedTemporaryFile(mode='w') as tf:
-        print 'doing put'
         compression_p = popen_sp([LZOP_BIN, '--stdout'],
                                  stdin=subprocess.PIPE, stdout=tf)
         tpart.tarfile_write(compression_p.stdin)
         compression_p.stdin.flush()
         compression_p.stdin.close()
-        print 'waiting for compression process'
         compression_p.wait()
-        print 'compression process finished'
         if compression_p.returncode != 0:
             raise Exception(
                 ('Could not properly compress tar partition: {tpart_number}  '
@@ -279,13 +305,11 @@ def do_partition_put(backup_s3_prefix, tpart_number, tpart, s3cmd_config_path):
         # processes, but *NOT* force a write to disk.
         tf.flush()
 
-        print 'attempting to send'
         check_call_wait_sigint(
             [S3CMD_BIN, '-c', s3cmd_config_path, 'put', tf.name,
              '/'.join([backup_s3_prefix, 'tar_partitions',
                        'part_{tpart_number}.tar.lzo'.format(
                             tpart_number=tpart_number)])])
-        print 'sent'
 
 
 def do_partition_get(backup_s3_prefix, local_root, tpart_number,
@@ -322,8 +346,8 @@ def do_partition_get(backup_s3_prefix, local_root, tpart_number,
                 popen.send_signal(signal.SIGINT)
                 popen.wait()
             except OSError, e:
-                # No such process == 3
-                if e.errno != 3:
+                # ESRCH aka "no such process"
+                if e.errno != errno.ESRCH:
                     raise e
 
         raise keyboard_int
@@ -398,8 +422,8 @@ def do_lzop_s3_get(s3_url, path, s3cmd_config_path):
                     popen.send_signal(signal.SIGINT)
                     popen.wait()
                 except OSError, e:
-                    # No such process == 3
-                    if e.errno != 3:
+                    # ESRCH aka "no such process"
+                    if e.errno != errno.ESRCH:
                         raise e
 
             raise keyboard_int
@@ -486,12 +510,22 @@ class S3Backup(object):
 
         walker = os.walk(pg_cluster_dir, onerror=raise_walk_error)
         for root, dirnames, filenames in walker:
+            is_cluster_toplevel = (os.path.abspath(root) ==
+                                   os.path.abspath(pg_cluster_dir))
+
             # Don't care about WAL, only heap.
-            if 'pg_xlog' in dirnames:
-                dirnames.remove('pg_xlog')
+            if is_cluster_toplevel:
+                if 'pg_xlog' in dirnames:
+                    dirnames.remove('pg_xlog')
 
             for filename in filenames:
-                matches.append(os.path.join(root, filename))
+                if is_cluster_toplevel and filename in ('postmaster.pid',
+                                                        'postgresql.conf'):
+                    # Do not include the postmaster pid file or the
+                    # configuration file in the backup.
+                    pass
+                else:
+                    matches.append(os.path.join(root, filename))
 
             # Special case for empty directories
             if not filenames:
@@ -539,9 +573,9 @@ class S3Backup(object):
             # Enqueue uploads for parallel execution
             try:
                 for tpart_number, tpart in enumerate(partitions):
-                    #uploads.append(pool.apply_async(
-                    apply(do_partition_put, [backup_s3_prefix, tpart_number, tpart,
-                                             s3cmd_config.name])
+                    uploads.append(pool.apply_async(
+                            do_partition_put, [backup_s3_prefix, tpart_number, tpart,
+                                               s3cmd_config.name]))
 
                 pool.close()
             finally:
@@ -654,7 +688,6 @@ class S3Backup(object):
                 # numbered contiguously from 0 to some number.
                 expected_partitions = set(xrange(max(partitions) + 1))
                 if partitions != expected_partitions:
-                    print partitions, expected_partitions
                     raise Exception('There exist missing tar partitions.  '
                                     'Numbers missing: ' +
                                     unicode(expected_partitions - partitions))
@@ -789,6 +822,63 @@ class S3Backup(object):
                                              wal_name),
                 wal_destination, s3cmd_config.name)
 
+    def wal_fark(self, pg_cluster_dir):
+        """
+        A function that performs similarly to the PostgreSQL archiver
+
+        It's the FAke ArKiver.
+
+        This is for use when the database is not online (and can't
+        archive its segments) or in put into standby mode to quiesce
+        the system.  It was written to be useful in switchover
+        scenarios.
+
+        Notes:
+
+        It is questionable if it belongs to class S3Backup (where it
+        began life)
+
+        It'd be nice if there was a way to use the PostgreSQL archiver
+        separately from the database, possibly with enough hooks to
+        enable parallel archiving.
+
+        """
+        xlog_dir = os.path.join(pg_cluster_dir, 'pg_xlog')
+        archive_status_dir = os.path.join(xlog_dir, 'archive_status')
+        suffix = '.ready'
+        for ready_path in sorted(glob.iglob(os.path.join(
+                    archive_status_dir, '*.ready'))):
+            try:
+                assert ready_path.endswith(suffix)
+                archivee_name = os.path.basename(ready_path)[:-len(suffix)]
+                self.wal_s3_archive(os.path.join(xlog_dir, archivee_name))
+            except OSError, e:
+                if e.errno == errno.ENOENT:
+                    raise Exception('Unexpected, could not read file: ' +
+                                    unicode(e.filename))
+                else:
+                    raise e
+
+            # It's critically important that this only happen if
+            # the archiving completed successfully, but an ENOENT
+            # can happen if there is a (harmless) race condition,
+            # assuming that anyone who would move the archive
+            # status file has done the requisite work.
+            try:
+                done_path = os.path.join(os.path.dirname(ready_path),
+                                         archivee_name + '.done')
+                os.rename(ready_path, done_path)
+            except OSError, e:
+                if e.errno == errno.ENOENT:
+                    print >>sys.stderr, \
+                        ('Archive status file {ready_path} no longer '
+                         'exists, there may be another racing archiving '
+                         'process.  This is harmless IF ALL ARCHIVERS ARE '
+                         'WELL-BEHAVED but potentially wasteful.'
+                         .format(ready_path=ready_path))
+                else:
+                    raise e
+
 
 def external_program_check(
     to_check=frozenset([PSQL_BIN, LZOP_BIN, S3CMD_BIN])):
@@ -880,40 +970,23 @@ def main(argv=None):
     subparsers.add_parser('backup-push',
                           help='pushing a fresh hot backup to S3',
                           parents=[backup_fetchpull_parent])
-    recovery_conf_generate_parser = subparsers.add_parser(
-        'recovery-conf-generator', help='help generating recovery.conf')
     wal_fetch_parser = subparsers.add_parser(
         'wal-fetch', help='fetch a WAL file from S3',
         parents=[wal_fetchpull_parent])
     subparsers.add_parser('wal-push', help='push a WAL file to S3',
                           parents=[wal_fetchpull_parent])
 
+    wal_fark_parser = subparsers.add_parser('wal-fark', help='The FAke Arkiver')
+
+    # XXX: Partial copy paste, because no parallel archiving support
+    # is supported and to have the --pool option would be confusing.
+    wal_fark_parser.add_argument('PG_CLUSTER_DIRECTORY',
+                                 help="Postgres cluster path, "
+                                 "such as '/var/lib/database'")
 
     # backup-fetch operator section
     backup_fetch_parser.add_argument('BACKUP_NAME',
                                      help='the name of the backup to fetch')
-
-    # recovery conf generator section
-    recovery_conf_generate_parser.add_argument(
-        '--python-bin', default='python', nargs='?',
-        help='the Python binary to run wal-e with.'
-        'Example: "python2.6"')
-
-    recovery_conf_generate_parser.add_argument(
-        'RECOVERY_OUTPUT_FILE',
-        type=argparse.FileType('w'), nargs='?', default=sys.stdout,
-        help='the destination of the recovery.conf to write, '
-        'or \'-\' for stdout.')
-
-    timeline_recovery_group = (recovery_conf_generate_parser
-                               .add_mutually_exclusive_group())
-    timeline_recovery_group.add_argument(
-        '-t', '--target-time',
-        help='Provide a time for Postgres to recover to.  '
-        'Any Postgres-compatible time format is allowed.')
-    timeline_recovery_group.add_argument(
-        '-x', '--target-xid',
-        type=int, help='Provide a transaction id for Postgres to recover to.')
 
     # wal-push operator section
     wal_fetch_parser.add_argument('WAL_DESTINATION',
@@ -966,29 +1039,9 @@ def main(argv=None):
     elif subcommand == 'wal-push':
         external_program_check([S3CMD_BIN, LZOP_BIN])
         backup_cxt.wal_s3_archive(args.WAL_SEGMENT)
-    elif subcommand == 'recovery-conf-generator':
-        this_bin = os.path.abspath(argv[0])
-        command = ('{python} {wal_e} --aws-access-key-id={aws_access_key_id} '
-                   '--s3-prefix={s3_prefix} wal-fetch "%f" "%p"'
-                   .format(python=args.python_bin, wal_e=this_bin,
-                           aws_access_key_id=aws_access_key_id,
-                           s3_prefix=s3_prefix))
-
-        lines = []
-        lines.append("restore_command = '{0}'".format(command))
-
-        if args.target_time is not None:
-            assert ('"' not in args.point_in_time and
-                    "'" not in args.point_in_time)
-            lines.append("recovery_target_time = '{0}'"
-                         .format(args.point_in_time))
-        elif args.target_xid is not None:
-            # No sanitization necessary: argparse knows this is an
-            # integer.
-            lines.append("recovery_target_xid = '{0}'"
-                         .format(args.target_xid))
-
-        print >>args.RECOVERY_OUTPUT_FILE, '\n'.join(lines)
+    elif subcommand == 'wal-fark':
+        external_program_check([S3CMD_BIN, LZOP_BIN])
+        backup_cxt.wal_fark(args.PG_CLUSTER_DIRECTORY)
     else:
         print >>sys.stderr, ('Subcommand {0} not implemented!'
                              .format(subcommand))

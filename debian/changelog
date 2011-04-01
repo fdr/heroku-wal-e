@@ -1,3 +1,17 @@
+wal-e (0.3-1ppa1ubuntu1) lucid; urgency=low
+
+  * README update
+  * Remove semi-useless recovery-conf-generator subcommand
+  * Timezone pedantry
+  * Use symbolic names for errno interpretation of exceptions
+  * Exclude some more files that may lead to confusion
+  * Re-enable parallel upload of base backups
+  * Remove debugging prints from tarfile implementation
+  * Implement wal-fark
+  * v0.3.0
+
+ -- Daniel Farina <daniel@heroku.com>  Thu, 31 Mar 2011 19:46:50 -0700
+
 wal-e (0.2-1ppa1ubuntu1) lucid; urgency=low
 
   * Implement tar-based volumes
