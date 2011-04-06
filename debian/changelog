@@ -1,3 +1,11 @@
+wal-e (0.4-1ppa1ubuntu1) lucid; urgency=low
+
+  * 0.4.0.dev0
+  * Format Bump: Switch to JSON backup sentinel with size information
+  * v0.4.0
+
+ -- Daniel Farina <daniel@heroku.com>  Tue, 05 Apr 2011 18:02:47 -0700
+
 wal-e (0.3-1ppa1ubuntu2) lucid; urgency=low
 
   * v0.3.1.dev0
