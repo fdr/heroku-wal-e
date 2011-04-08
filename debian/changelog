@@ -1,3 +1,9 @@
+wal-e (0.4-1ppa1ubuntu2) lucid; urgency=low
+
+  * Add lzop dependency to control file
+
+ -- Daniel Farina <daniel@heroku.com>  Thu, 07 Apr 2011 20:32:41 -0700
+
 wal-e (0.4-1ppa1ubuntu1) lucid; urgency=low
 
   * 0.4.0.dev0
