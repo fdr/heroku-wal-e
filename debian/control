@@ -2,13 +2,14 @@ Source: wal-e
 Maintainer: Daniel Farina <daniel@heroku.com>
 Section: python
 Priority: optional
-Build-Depends: python-setuptools (>= 0.6b3), debhelper (>= 7.4.3), python-support (>= 0.8.4)
+Build-Depends: python-setuptools (>= 0.6b3), debhelper (>= 7.4.3),
+ python-support (>= 0.8.4)
 Standards-Version: 3.8.4
 
 Package: python-wal-e
 Architecture: all
-Depends: ${misc:Depends}, ${python:Depends}, python-argparse (>= 0.8), s3cmd (>= 0.9), lzop (>= 1.0)
+Depends: ${misc:Depends}, ${python:Depends}, python-argparse (>= 0.8),
+ s3cmd (>= 0.9), lzop (>= 1.0), mbuffer (>= 20091213)
 XB-Python-Version: ${python:Versions}
 Provides: ${python:Provides}
 Description: PostgreSQL WAL-shipping for S3
-
