@@ -1,3 +1,14 @@
+wal-e (0.5.1-1ubuntu1ppa1) lucid; urgency=low
+
+  * v0.5.1dev0
+  * Add TODO about small databases and rate limiting arithmetic gotcha
+  * Handle shrinking files
+  * Fix growing-file handling with mbuffer
+  * v0.5.1
+  * Fix bogus version numbering scheme ("ubuntu" should come first)
+
+ -- Daniel Farina <daniel@heroku.com>  Thu, 14 Apr 2011 11:28:12 -0700
+
 wal-e (0.5-1ppa1ubuntu1) lucid; urgency=low
 
   * v0.5.0.dev0
