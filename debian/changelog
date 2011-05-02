@@ -1,3 +1,18 @@
+wal-e (0.5.2-1ubuntu1ppa1) lucid; urgency=low
+
+  * Fix README cut-and-pasto about backup fetching
+  * v0.5.2dev0
+  * Capture WAL directory or symlink in a tar (but not contents)
+  * Avoid binding unused symbol
+  * Avoid unnecessary use of a symbol in simple exception handling
+  * Line length fixes
+  * Begin to have some semblance of user error reporting
+  * Fix absurd buffer size for pipes
+  * Improve file-reading pipeline
+  * v0.5.2
+
+ -- Daniel Farina <daniel@heroku.com>  Mon, 02 May 2011 17:00:40 -0700
+
 wal-e (0.5.1-1ubuntu1ppa1) lucid; urgency=low
 
   * v0.5.1dev0
