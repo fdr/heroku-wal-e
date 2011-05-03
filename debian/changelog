@@ -1,3 +1,13 @@
+wal-e (0.5.3-1ubuntu1ppa1) lucid; urgency=low
+
+  * v0.5.3dev0
+  * Fix bugs in --cluster-read-rate-limit
+  * Remove stray line that snuck in
+  * Attempt to fix dyslexia in the 1ubuntu1ppa1 vs 1ppa1ubuntu1 versioning
+  * v0.5.3
+
+ -- Daniel Farina <daniel@heroku.com>  Tue, 03 May 2011 14:44:17 -0700
+
 wal-e (0.5.2-1ubuntu1ppa1) lucid; urgency=low
 
   * Fix README cut-and-pasto about backup fetching
