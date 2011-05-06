@@ -6,9 +6,12 @@ with the intention that they are used in forked worker processes.
 
 """
 
-import tempfile
+import errno
+import signal
 import subprocess
 import sys
+import tarfile
+import tempfile
 
 import wal_e.log_help as log_help
 
