@@ -1,3 +1,12 @@
+wal-e (0.5.5-1ubuntu1ppa1) lucid; urgency=low
+
+  * v0.5.5dev0
+  * README updates
+  * Another lousy identifier fix
+  * v0.5.5
+
+ -- Daniel Farina <daniel@heroku.com>  Fri, 06 May 2011 17:40:06 -0700
+
 wal-e (0.5.4-1ubuntu1ppa1) lucid; urgency=low
 
   * v0.5.4dev0
