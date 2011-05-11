@@ -271,13 +271,12 @@ class BackupList(object):
                  detail, detail_retry, detail_timeout, list_retry,
                  list_timeout):
         self.s3_conn = s3_conn
-        self.s3_prefix = s3_prefix
+        self.layout = s3_storage.StorageLayout(s3_prefix)
         self.detail = detail
         self.detail_retry = detail_retry
         self.detail_timeout = detail_timeout
         self.list_retry = list_retry
         self.list_timeout = list_timeout
-
 
     def _backup_detail(self, key):
         contents = None
@@ -294,16 +293,13 @@ class BackupList(object):
         else:
             return contents
 
-
-    def __iter__(self):
-        layout = s3_storage.StorageLayout(self.s3_prefix)
-
+    def _verify_and_get_bucket(self):
         # Abuse pagination timeouts to also verify the bucket.  Close
         # enough.(?)
         bucket = None
         for i in xrange(self.list_retry):
             with gevent.Timeout(self.list_timeout, False) as timeout:
-                bucket = self.s3_conn.get_bucket(layout.bucket_name())
+                bucket = self.s3_conn.get_bucket(self.layout.bucket_name())
 
         if bucket is None:
             raise UserException(msg='could not verify bucket',
@@ -312,12 +308,24 @@ class BackupList(object):
                                 hint='Consider raising the timeout, number '
                                 'of retries, or trying again later.')
 
+        return bucket
+
+    def wal_last(self):
+        bucket = self._verify_and_get_bucket()
+        
+        for key in bucket_lister(bucket, self.list_retry, self.list_timeout,
+                                 prefix=self.layout.wal_directory()):
+            print key
+
+    def  __iter__(self):
+        bucket = self._verify_and_get_bucket()
+
         # Try to identify the sentinel file.  This is sort of a drag, the
         # storage format should be changed to put them in their own leaf
         # directory.
         #
         # TODO: change storage format
-        base_depth = layout.basebackups().count('/')
+        base_depth = self.layout.basebackups().count('/')
         sentinel_depth = base_depth + 1
 
         matcher = re.compile(s3_storage.BASE_BACKUP_REGEXP).match
@@ -326,7 +334,7 @@ class BackupList(object):
         # request per page.
 
         for key in bucket_lister(bucket, self.list_retry, self.list_timeout,
-                                 prefix=layout.basebackups()):
+                                 prefix=self.layout.basebackups()):
             # Use key depth vs. base and regexp matching to find
             # sentinel files.
             key_depth = key.name.count('/')

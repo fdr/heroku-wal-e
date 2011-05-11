@@ -238,6 +238,17 @@ class S3Backup(object):
 
         sys.stdout.flush()
 
+    def wal_report(self, list_retry, list_timeout):
+        from boto.s3.connection import OrdinaryCallingFormat
+        from boto.s3.connection import S3Connection
+
+        from wal_e.storage.s3_storage import WalReport
+
+        s3_conn = S3Connection(self.aws_access_key_id,
+                               self.aws_secret_access_key,
+                               calling_format=OrdinaryCallingFormat())
+
+
     def _s3_upload_pg_cluster_dir(self, start_backup_info, pg_cluster_dir,
                                   version, pool_size, rate_limit=None):
         """
@@ -783,41 +794,26 @@ def main(argv=None):
     wal_fetchpush_parent.add_argument('WAL_SEGMENT',
                                       help='Path to a WAL segment to upload')
 
+    list_retry_parent = argparse.ArgumentParser(add_help=False)
+    list_retry_parent.add_argument(
+        '--list-timeout', default=float(10), type=float, metavar='SECONDS',
+        help='how many seconds to wait before timing out an attempt to get '
+        'base backup list')
+    list_retry_parent.add_argument(
+        '--list-retry', default=3, type=int, metavar='TIMES',
+        help='how many times to retry each pagination in listing backups')
+
+    # backup-fetch operator section
     backup_fetch_parser = subparsers.add_parser(
         'backup-fetch', help='fetch a hot backup from S3',
         parents=[backup_fetchpush_parent])
-    backup_list_parser = subparsers.add_parser('backup-list',
-                                               help='list backups in S3')
-    backup_push_parser = subparsers.add_parser(
-        'backup-push', help='pushing a fresh hot backup to S3',
-        parents=[backup_fetchpush_parent])
-    backup_push_parser.add_argument(
-        '--cluster-read-rate-limit',
-        help='Rate limit reading the PostgreSQL cluster directory to a '
-        'tunable number of bytes per second', dest='rate_limit',
-        metavar='BYTES_PER_SECOND',
-        type=int, default=None)
-
-    wal_fetch_parser = subparsers.add_parser(
-        'wal-fetch', help='fetch a WAL file from S3',
-        parents=[wal_fetchpush_parent])
-    subparsers.add_parser('wal-push', help='push a WAL file to S3',
-                          parents=[wal_fetchpush_parent])
-
-    wal_fark_parser = subparsers.add_parser('wal-fark',
-                                            help='The FAke Arkiver')
-
-    # XXX: Partial copy paste, because no parallel archiving support
-    # is supported and to have the --pool option would be confusing.
-    wal_fark_parser.add_argument('PG_CLUSTER_DIRECTORY',
-                                 help="Postgres cluster path, "
-                                 "such as '/var/lib/database'")
-
-    # backup-fetch operator section
     backup_fetch_parser.add_argument('BACKUP_NAME',
                                      help='the name of the backup to fetch')
 
     # backup-list operator section
+    backup_list_parser = subparsers.add_parser('backup-list',
+                                               help='list backups in S3',
+                                               parents=[list_retry_parent])
     backup_list_parser.add_argument(
         '--detail', default=False, action='store_true',
         help='show more detailed information about every backup')
@@ -828,14 +824,39 @@ def main(argv=None):
     backup_list_parser.add_argument(
         '--detail-retry', default=3, type=int, metavar='TIMES',
         help='how many times to retry getting details')
-    backup_list_parser.add_argument(
-        '--list-timeout', default=float(10), type=float, metavar='SECONDS',
-        help='how many seconds to wait before timing out an attempt to get '
-        'base backup list')
-    backup_list_parser.add_argument(
-        '--list-retry', default=3, type=int, metavar='TIMES',
-        help='how many times to retry each pagination in listing backups')
 
+    # backup-push operator section
+    backup_push_parser = subparsers.add_parser(
+        'backup-push', help='pushing a fresh hot backup to S3',
+        parents=[backup_fetchpush_parent])
+    backup_push_parser.add_argument(
+        '--cluster-read-rate-limit',
+        help='Rate limit reading the PostgreSQL cluster directory to a '
+        'tunable number of bytes per second', dest='rate_limit',
+        metavar='BYTES_PER_SECOND',
+        type=int, default=None)
+
+    # wal-fetch operator section
+    wal_fetch_parser = subparsers.add_parser(
+        'wal-fetch', help='fetch a WAL file from S3',
+        parents=[wal_fetchpush_parent])
+    subparsers.add_parser('wal-push', help='push a WAL file to S3',
+                          parents=[wal_fetchpush_parent])
+
+    # wal-fark operator section
+    wal_fark_parser = subparsers.add_parser('wal-fark',
+                                            help='The FAke Arkiver')
+
+    # wal-report operator section
+    wal_report_parser = subparsers.add_parser(
+        'wal-report', parents=[list_retry_parent],
+        help='Reports on WAL file contiguity and timelines')
+
+    # XXX: Partial copy paste, because no parallel archiving support
+    # is supported and to have the --pool option would be confusing.
+    wal_fark_parser.add_argument('PG_CLUSTER_DIRECTORY',
+                                 help="Postgres cluster path, "
+                                 "such as '/var/lib/database'")
 
     # wal-push operator section
     wal_fetch_parser.add_argument('WAL_DESTINATION',
@@ -902,6 +923,9 @@ def main(argv=None):
         elif subcommand == 'wal-fark':
             external_program_check([S3CMD_BIN, LZOP_BIN])
             backup_cxt.wal_fark(args.PG_CLUSTER_DIRECTORY)
+        elif subcommand == 'wal-report':
+            backup_cxt.wal_report(list_retry=args.list_retry,
+                                  list_timeout=args.list_timeout)
         else:
             print >>sys.stderr, ('Subcommand {0} not implemented!'
                                  .format(subcommand))
