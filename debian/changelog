@@ -1,11 +1,18 @@
-wal-e (0.5.5-1ubuntu1ppa1) lucid; urgency=low
+wal-e (0.5.6~pre0-1ubuntu1ppa1) lucid; urgency=low
 
-  * v0.5.5dev0
-  * README updates
-  * Another lousy identifier fix
-  * v0.5.5
+  * v0.5.6dev0
+  * Introduce boto and gevent dependency
+  * Use non-blocking pipes everywhere in WAL-E
+  * Implement wal-e backup-list QUERY feature
+  * Add TODO about boto retry logic
+  * Pass storage layouts instead of raw s3 prefixes
+  * Split S3 guts out of cmd.py
+  * Fix external program check detection
+  * Normalize option/argument nomenclature
+  * Add closed property to NonBlockPipeFileWrap
+  * Overhaul backup fetch to use boto
 
- -- Daniel Farina <daniel@heroku.com>  Fri, 06 May 2011 17:40:06 -0700
+ -- Daniel Farina <daniel@heroku.com>  Tue, 31 May 2011 17:59:49 -0700
 
 wal-e (0.5.4-1ubuntu1ppa1) lucid; urgency=low
 
