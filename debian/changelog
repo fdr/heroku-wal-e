@@ -1,3 +1,9 @@
+wal-e (0.5.6~pre1-2ubuntu1ppa1) lucid; urgency=low
+
+  * Add brutal hack to avoid non-blocking I/O wrapper in regular pipes
+
+ -- Daniel Farina <daniel@heroku.com>  Wed, 01 Jun 2011 12:32:38 -0700
+
 wal-e (0.5.6~pre0-1ubuntu1ppa1) lucid; urgency=low
 
   * v0.5.6dev0
