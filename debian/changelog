@@ -1,3 +1,14 @@
+wal-e (0.5.7~pre0-1ubuntu1ppa1) lucid; urgency=low
+
+  * v0.5.6dev0
+  * Standardize on EnvironmentError for errno checking exception paths
+  * Pad files with zeros when in the non-rate-limited code path
+  * v0.5.6
+  * v0.5.7dev0
+  * Fix think-o: UserError => UserException
+
+ -- Daniel Farina <daniel@heroku.com>  Mon, 06 Jun 2011 15:53:32 -0700
+
 wal-e (0.5.6~pre1-2ubuntu1ppa1) lucid; urgency=low
 
   * Add brutal hack to avoid non-blocking I/O wrapper in regular pipes
