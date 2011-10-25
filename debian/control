@@ -9,9 +9,9 @@ Standards-Version: 3.8.4
 Package: python-wal-e
 Architecture: all
 Depends: ${misc:Depends}, ${python:Depends}, python-argparse (>= 0.8),
- s3cmd (>= 0.9), lzop (>= 1.0), mbuffer (>= 20091213),
+ lzop (>= 1.0), mbuffer (>= 20091213),
  libevent-1.4-2 (>= 1.4.13-stable), python-gevent (>= 0.13.0),
- python-boto (>=2.0b4)
+ python-boto (>=2.0)
 XB-Python-Version: ${python:Versions}
 Provides: ${python:Provides}
 Description: PostgreSQL WAL-shipping for S3

@@ -1,3 +1,11 @@
+wal-e (0.5.7+0.5.8c4-1heroku~lucid~ppa0) lucid; urgency=low
+
+  * New upstream release candidate
+  * Remove s3cmd dependency (no longer required by upstream)
+  * Depend on boto release 2.0 (new upstream dependency)
+
+ -- Daniel Farina <drfarina@acm.org>  Tue, 25 Oct 2011 14:40:26 -0700
+
 wal-e (0.5.7~pre0-1ubuntu1ppa1) lucid; urgency=low
 
   * v0.5.6dev0
