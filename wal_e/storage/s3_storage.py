@@ -14,15 +14,29 @@ import wal_e.exception
 from urlparse import urlparse
 
 
-BASE_BACKUP_REGEXP = (r'base'
-                      r'_(?P<segment>[0-9a-zA-Z.]{0,60})'
-                      r'_(?P<offset>[0-9A-F]{8})')
+CURRENT_VERSION = '005'
 
-COMPLETE_BASE_BACKUP_REGEXP = \
-    (r'base'
-     r'_(?P<segment>[0-9a-zA-Z.]{0,60})'
-     r'_(?P<offset>[0-9A-F]{8})_backup_stop_sentinel.json')
+SEGMENT_REGEXP = (r'(?P<filename>(?P<tli>[0-9A-F]{8,8})(?P<log>[0-9A-F]{8,8})'
+                  '(?P<seg>[0-9A-F]{8,8}))')
 
+BASE_BACKUP_REGEXP = (r'base_' + SEGMENT_REGEXP + r'_(?P<offset>[0-9A-F]{8})')
+
+COMPLETE_BASE_BACKUP_REGEXP = (
+    r'base_' + SEGMENT_REGEXP +
+    r'_(?P<offset>[0-9A-F]{8})_backup_stop_sentinel\.json')
+
+VOLUME_REGEXP = (r'part_(\d+)\.tar\.lzo')
+
+# A representation of a log number and segment, naive of timeline.
+# This number always increases, even when diverging into two
+# timelines, so it's useful for conservative garbage collection.
+class SegmentNumber(collections.namedtuple('SegmentNumber', ['log', 'seg'])):
+
+    @property
+    def as_an_integer(self):
+        assert len(self.log) == 8
+        assert len(self.seg) == 8
+        return int(self.log + self.seg, 16)
 
 # Exhaustively enumerates all possible metadata about a backup.  These
 # may not always all be filled depending what access method is used to
@@ -39,15 +53,16 @@ BackupInfo = collections.namedtuple('BackupInfo',
                                      'wal_segment_backup_stop',
                                      'wal_segment_offset_backup_stop'])
 
+
 class StorageLayout(object):
     """
     Encapsulates and defines S3 URL path manipulations for WAL-E
 
     """
 
-    VERSION = '005'
+    def __init__(self, prefix, version=CURRENT_VERSION):
+        self.VERSION = version
 
-    def __init__(self, prefix):
         url_tup = urlparse(prefix)
 
         if url_tup.scheme != 's3':
@@ -59,33 +74,50 @@ class StorageLayout(object):
         self._url_tup = url_tup
 
         # S3 api requests absolutely cannot contain a leading slash.
-        self._s3_api_prefix = url_tup.path.lstrip('/')
+        s3_api_prefix = url_tup.path.lstrip('/')
+
+        # Also canonicalize a trailing slash onto the prefix, should
+        # none already exist.
+        if s3_api_prefix[-1] != '/':
+            self._s3_api_prefix = s3_api_prefix + '/'
+        else:
+            self.s3_api_prefix = s3_api_prefix
+
+    def _error_on_unexpected_version(self):
+        if self.VERSION != '005':
+            raise ValueError('Backwards compatibility of this '
+                             'operator is not implemented')
 
     def basebackups(self):
-        return self._s3_api_prefix + '/basebackups_' + self.VERSION
+        return self._s3_api_prefix + 'basebackups_' + self.VERSION + '/'
 
     def basebackup_directory(self, backup_info):
+        self._error_on_unexpected_version()
         return (self.basebackups() +
-                '/base_{0}_{1}'.format(
+                'base_{0}_{1}/'.format(
                 backup_info.wal_segment_backup_start,
                 backup_info.wal_segment_offset_backup_start))
 
     def basebackup_sentinel(self, backup_info):
+        self._error_on_unexpected_version()
         return (self.basebackup_directory(backup_info) +
                 '_backup_stop_sentinel.json')
 
     def basebackup_tar_partition_directory(self, backup_info):
+        self._error_on_unexpected_version()
         return (self.basebackup_directory(backup_info) +
-                '/tar_partitions')
+                'tar_partitions/')
 
     def basebackup_tar_partition(self, backup_info, part_name):
+        self._error_on_unexpected_version()
         return (self.basebackup_tar_partition_directory(backup_info) +
-                '/' + part_name)
+                part_name)
 
     def wal_directory(self):
-        return self._s3_api_prefix + '/wal_' + self.VERSION
+        return self._s3_api_prefix + 'wal_' + self.VERSION + '/'
 
     def wal_path(self, wal_file_name):
+        self._error_on_unexpected_version()
         return self.wal_directory() + wal_file_name
 
     def bucket_name(self):

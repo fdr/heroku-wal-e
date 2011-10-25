@@ -8,6 +8,7 @@ import logging
 import os
 import time
 
+
 class UTCFormatter(logging.Formatter):
 
     # Undocumented, seemingly still in 2.7 (see
@@ -75,16 +76,56 @@ def configure(*args, **kwargs):
             logging.root.setLevel(level)
 
 
-def get_logger(*args, **kwargs):
-    return logging.getLogger(*args, **kwargs)
+class WalELogger(object):
+    def __init__(self, *args, **kwargs):
+        # Enable a shortcut to create the logger and set its level all
+        # at once.  To do that, pop the level out of the dictionary,
+        # which will otherwise cause getLogger to explode.
+        level = kwargs.pop('level', None)
 
+        self._logger = logging.getLogger(*args, **kwargs)
 
-def fmt_logline(msg, detail=None, hint=None):
-    msg_parts = ['MSG: ' + msg]
+        if level is not None:
+            self._logger.setLevel(level)
 
-    if detail is not None:
-        msg_parts.append('DETAIL: ' + detail)
-    if hint is not None:
-        msg_parts.append('HINT: ' + hint)
+    @staticmethod
+    def fmt_logline(msg, detail=None, hint=None):
+        msg_parts = ['MSG: ' + msg]
 
-    return '\n'.join(msg_parts)
+        if detail is not None:
+            msg_parts.append('DETAIL: ' + detail)
+        if hint is not None:
+            msg_parts.append('HINT: ' + hint)
+
+        return '\n'.join(msg_parts)
+
+    def log(self, level, msg, *args, **kwargs):
+        detail = kwargs.pop('detail', None)
+        hint = kwargs.pop('hint', None)
+
+        self._logger.log(
+            level,
+            self.fmt_logline(msg, detail, hint),
+            *args, **kwargs)
+
+    # Boilerplate convenience shims to different logging levels.  One
+    # could abuse dynamism to generate these bindings in a loop, but
+    # one day I hope to run with PyPy and tricks like that tend to
+    # lobotomize an optimizer something fierce.
+
+    def debug(self, *args, **kwargs):
+        self.log(logging.DEBUG, *args, **kwargs)
+
+    def info(self, *args, **kwargs):
+        self.log(logging.INFO, *args, **kwargs)
+
+    def warning(self, *args, **kwargs):
+        self.log(logging.WARNING, *args, **kwargs)
+
+    def error(self, *args, **kwargs):
+        self.log(logging.ERROR, *args, **kwargs)
+
+    def critical(self, *args, **kwargs):
+        self.log(logging.CRITICAL, *args, **kwargs)
+
+    # End convenience shims

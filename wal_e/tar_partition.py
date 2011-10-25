@@ -43,7 +43,10 @@ import os
 import sys
 import tarfile
 
-import piper
+import wal_e.log_help as log_help
+import wal_e.piper
+
+logger = log_help.WalELogger(__name__)
 
 
 class StreamPadFileObj(object):
@@ -109,16 +112,21 @@ class TarBadPathError(Exception):
 ExtendedTarInfo = collections.namedtuple('ExtendedTarInfo',
                                          'submitted_path tarinfo')
 
+
 class TarPartition(list):
+
+    def __init__(self, name, *args, **kwargs):
+        self.name = name
+        list.__init__(self, *args, **kwargs)
 
     @staticmethod
     def _padded_tar_add(tar, et_info, rate_limit=None):
         try:
             with open(et_info.submitted_path, 'rb') as raw_file:
                 if rate_limit is not None:
-                    mbuffer = piper.popen_sp(
+                    mbuffer = wal_e.piper.popen_sp(
                         ['mbuffer', '-r', unicode(int(rate_limit))],
-                        stdin=raw_file, stdout=piper.PIPE)
+                        stdin=raw_file, stdout=wal_e.piper.PIPE)
 
                     with StreamPadFileObj(mbuffer.stdout,
                                           et_info.tarinfo.size) as f:
@@ -134,8 +142,9 @@ class TarPartition(list):
                 # log a NOTICE/INFO that the file was unlinked.
                 # Ostensibly harmless (such unlinks should be replayed
                 # in the WAL) but good to know.
-                print >>sys.stderr, 'skipping unlinked file'
-                print >>sys.stderr, 'unlinked path: ' + et_info.submitted_path
+                logger.debug(
+                    msg='tar member additions skipping an unlinked file',
+                    detail='Skipping {0}.'.format(et_info.submitted_path))
             else:
                 raise
 
@@ -206,12 +215,24 @@ def tar_partitions_plan(root, file_path_list, max_partition_size):
             assert file_path.startswith(root)
             assert root.endswith(os.path.sep)
 
-            et_info = ExtendedTarInfo(
-                tarinfo=bogus_tar.gettarinfo(
-                    file_path, arcname=file_path[len(root):]),
-                submitted_path=file_path)
+            try:
+                et_info = ExtendedTarInfo(
+                    tarinfo=bogus_tar.gettarinfo(
+                        file_path, arcname=file_path[len(root):]),
+                    submitted_path=file_path)
 
-            et_infos.append(et_info)
+                et_infos.append(et_info)
+            except EnvironmentError, e:
+                if (e.errno == errno.ENOENT and
+                    e.filename == file_path):
+                    # log a NOTICE/INFO that the file was unlinked.
+                    # Ostensibly harmless (such unlinks should be replayed
+                    # in the WAL) but good to know.
+                    logger.debug(
+                        msg='tar member additions skipping an unlinked file',
+                        detail='Skipping {0}.'.format(et_info.submitted_path))
+                else:
+                    raise
     finally:
         if bogus_tar is not None:
             bogus_tar.close()
@@ -227,7 +248,9 @@ def tar_partitions_plan(root, file_path_list, max_partition_size):
 
     # Start actual partitioning pass
     partition_bytes = 0
-    current_partition = TarPartition()
+
+    current_partition_number = 0
+    current_partition = TarPartition(current_partition_number)
 
     for et_info in et_infos:
         # Size of members must be enforced elsewhere.
@@ -237,8 +260,10 @@ def tar_partitions_plan(root, file_path_list, max_partition_size):
             yield current_partition
 
             # Prepare a fresh partition.
+            current_partition_number += 1
             partition_bytes = et_info.tarinfo.size
-            current_partition = TarPartition([et_info])
+            current_partition = TarPartition(
+                current_partition_number, [et_info])
         else:
             partition_bytes += et_info.tarinfo.size
             current_partition.append(et_info)

@@ -18,19 +18,13 @@ import sys
 from subprocess import PIPE
 from cStringIO import StringIO
 
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-# This is a brutal hack to make WAL-E usable while its operators are
-# in a transition phase between boto with nonblocking and regular
-# fork-worker based s3cmd.  In particular, the forked workers set
-# BRUTAL_AVOID_NONBLOCK_HACK to True, thus avoiding the
-# NonBlockPipeFileWrap wrapper around process pipes entirely.
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-BRUTAL_AVOID_NONBLOCK_HACK = False
 
 class NonBlockPipeFileWrap(object):
     def __init__(self, fp):
-        # Make the file nonblocking
-        fcntl.fcntl(fp, fcntl.F_SETFL, os.O_NONBLOCK)
+        # Make the file nonblocking (but don't lose its previous flags)
+        flags = fcntl.fcntl(fp, fcntl.F_GETFL)
+        fcntl.fcntl(fp, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
         self._fp = fp
 
     def read(self, size=None):
@@ -43,7 +37,7 @@ class NonBlockPipeFileWrap(object):
                     max_read = 4096
                 else:
                     max_read = min(4096, size - accum.tell())
-            
+
                 chunk = self._fp.read(max_read)
 
                 # End of the stream: leave the loop
@@ -130,7 +124,10 @@ def popen_sp(*args, **kwargs):
     # to the gevent hub.
     for fp_symbol in ['stdin', 'stdout', 'stderr']:
         value = getattr(proc, fp_symbol)
-        if value is not None and not BRUTAL_AVOID_NONBLOCK_HACK:
+
+        if value is not None:
+            # this branch is only taken if a descriptor is sent in
+            # with 'PIPE' mode.
             setattr(proc, fp_symbol, NonBlockPipeFileWrap(value))
 
     return proc
@@ -149,7 +146,8 @@ def pipe(*args):
 
     """
     if len(args) < 2:
-        raise ValueError, "pipe needs at least 2 processes"
+        raise ValueError("pipe needs at least 2 processes")
+
     # Set stdout=PIPE in every subprocess except the last
     for i in args[:-1]:
         i["stdout"] = subprocess.PIPE

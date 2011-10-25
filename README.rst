@@ -1,9 +1,25 @@
+
 WAL-E Disaster Recovery
 =======================
 
-WAL-E is a program designed perform continuous archiving of PostgreSQL
+.. contents:: Table of Contents
+
+Introduction
+------------
+
+WAL-E is a program designed to perform continuous archiving of PostgreSQL
 WAL files and manage the use of pg_start_backup and pg_stop_backup.
-It has four critical operators:
+
+To correspond on using WAL-E or to collaborate on its development, do
+not hesitate to send mail to the mailing list at
+wal-e@googlegroups.com.  Github issues are also currently being used
+to track known problems, so please feel free to submit those.
+
+
+Primary Commands and Concepts
+-----------------------------
+
+WAL-E has four critical operators:
 
 * backup-fetch
 * backup-push
@@ -26,7 +42,7 @@ With the exception of AWS_SECRET_ACCESS_KEY, all of these can be
 specified as arguments as well.  The AWS_* variables are the standard
 access-control keying system provided by Amazon.
 
-The WALE_S3_PREFIX can be thought of a context whereby this program
+The WALE_S3_PREFIX can be thought of as a context whereby this program
 operates on a single database cluster at a time.  Generally, for any
 one database the WALE_S3_PREFIX will be the same between all four
 operators.  This context-driven approach attempts to help users avoid
@@ -42,11 +58,22 @@ as long as the WALE_S3_PREFIX is set uniquely for each database.
 Dependencies
 ------------
 
-* s3cmd
 * lzop
 * psql
 * mbuffer
-* python-argparse *or* Python 2.7
+
+This software is most frequently used with Python 2.6+.  It will
+probably never support Python 2.5 or below because of the much more
+useful timeout semantics with sockets in Python 2.6+.  Still, if you
+feel strongly about supporting Python 2.5, please send mail to the
+mailing list (see the `Introduction`_).
+
+This software also has Python dependencies; installing with setup.py
+will attempt to resolve them:
+
+* gevent>=0.13
+* boto>=2.0
+* argparse, if not on Python 2.7
 
 
 Examples
@@ -54,20 +81,20 @@ Examples
 
 Pushing a base backup to S3::
 
-  $ AWS_SECRET_ACCESS_KEY=... python wal_e.py		\
+  $ AWS_SECRET_ACCESS_KEY=... wal-e			\
     -k AWS_ACCESS_KEY_ID				\
     --s3-prefix=s3://some-bucket/directory/or/whatever	\
     backup-push /var/lib/my/database
 
 Sending a WAL segment to S3::
 
-  $ AWS_SECRET_ACCESS_KEY=... python wal_e.py		\
+  $ AWS_SECRET_ACCESS_KEY=... wal-e			\
     -k AWS_ACCESS_KEY_ID				\
     --s3-prefix=s3://some-bucket/directory/or/whatever	\
     wal-push /var/lib/my/database/pg_xlog/WAL_SEGMENT_LONG_HEX
 
 It is generally recommended that one use some sort of environment
-variable management with WAL-E: working with it this way less verbose,
+variable management with WAL-E: working with it this way is less verbose,
 less prone to error, and less likely to expose secret information in
 logs.
 
@@ -97,8 +124,8 @@ After having done this preparation, it is possible to run WAL-E
 commands much more simply, with less risk of accidentally using
 incorrect values::
 
-  $ envdir /etc/wal-e.d/env python wal_e.py backup-push ...
-  $ envdir /etc/wal-e.d/env python wal_e.py wal-push ...
+  $ envdir /etc/wal-e.d/env wal-e backup-push ...
+  $ envdir /etc/wal-e.d/env wal-e wal-push ...
 
 envdir is conveniently combined with the archive_command functionality
 used by PostgreSQL to enable continuous archiving.  To enable
@@ -108,7 +135,7 @@ archiving are related here::
 
   wal_level = archive # hot_standby in 9.0 is also acceptable
   archive_mode = on
-  archive_command = 'envdir /etc/wal-e.d/env python /path/wal_e.py wal-push %p'
+  archive_command = 'envdir /etc/wal-e.d/env wal-e wal-push %p'
   archive_timeout = 60
 
 Every segment archived will be noted in the PostgreSQL log.
@@ -135,8 +162,8 @@ Pulling a base backup from S3::
     backup-fetch /var/lib/my/database LATEST"
 
 This command makes use of the "LATEST" pseudo-name for a backup, which
-defaults to querying S3 to find the latest complete backup.
-Otherwise, a real name can be used::
+queries S3 to find the latest complete backup.  Otherwise, a real name
+can be used::
 
     $ sudo -u postgres bash -c                          \
     "envdir /etc/wal-e.d/pull-env wal-e			\
@@ -158,6 +185,143 @@ file like this::
     restore_command = 'envdir /etc/wal-e.d/env wal-e wal-fetch "%f" "%p"'
 
 
+Auxiliary Commands
+------------------
+
+These are commands that are not used expressly for backup or WAL
+pushing and fetching, but are important to the monitoring or
+maintenance of WAL-E archived databases.  Unlike the critical four
+operators for taking and restoring backups (``backup-push``,
+``backup-fetch``, ``wal-push``, ``wal-fetch``) that must reside on the
+database machine, these commands can be productively run from any
+computer with ``WALE_S3_PREFIX`` and the necessary credentials to
+manipulate or read data there.
+
+
+backup-list
+'''''''''''
+
+backup-list is useful for listing base backups that are complete for a
+given WAL-E context.  Its output is subject to change, but currently
+it's a CSV with a one-line prepended header.  Some fields are only
+filled in when the ``--detail`` option is passed to ``backup-list``
+[#why-detail-flag]_.
+
+.. NOTE::
+   Some ``--detail`` only fields are not strictly to the right of
+   fields that do not require ``--detail`` be passed.  This is not a
+   problem if one uses any CSV parsing library (as two tab-delimiters
+   will be emitted) to signify the empty column, but if one is hoping
+   to use string mangling to extract fields, exhibit care.
+
+Firstly, the fields that are filled in regardless of if ``--detail``
+is passed or not:
+
+================================  ====================================
+        Header in CSV                           Meaning
+================================  ====================================
+name                              The name of the backup, which can be
+                                  passed to the ``delete`` and
+                                  ``backup-fetch`` commands.
+
+last_modified                     The date and time the backup was
+				  completed and uploaded, rendered in
+				  an ISO-compatible format with
+				  timezone information.
+
+wal_segment_backup_start          The wal segment number.  It is a
+                                  24-character hexadecimal number.
+                                  This information identifies the
+				  timeline and relative ordering of
+				  various backups.
+
+wal_segment_offset_backup_start   The offset in the WAL segment that
+				  this backup starts at.  This is
+				  mostly to avoid ambiguity in event
+				  of backups that may start in the
+				  same WAL segment.
+================================  ====================================
+
+Secondly, the fields that are filled in only when ``--detail`` is
+passed:
+
+================================  ====================================
+        Header in CSV                           Meaning
+================================  ====================================
+expanded_size_bytes               The decompressed size of the backup
+				  in bytes.
+
+wal_segment_backup_stop           The last WAL segment file required
+				  to bring this backup into a
+				  consistent state, and thus available
+				  for hot-standby.
+
+wal_segment_offset_backup_stop    The offset in the last WAL segment
+				  file required to bring this backup
+				  into a consistent state.
+================================  ====================================
+
+.. [#why-detail-flag] ``backup-list --detail`` is slower (one web
+   request per backup, rather than one web request per thousand
+   backups or so) than ``backup-list``, and often (but not always) the
+   information in the regular ``backup-list`` is all one needs.
+
+
+delete
+''''''
+
+``delete`` contains additional subcommands that are used for deleting
+data from S3 for various reasons.  These commands are organized
+separately because the ``delete`` subcommand itself takes options that
+apply to any subcommand that does deletion, such as ``--confirm``.
+
+All deletions are designed to be reentrant and idempotent: there are
+no negative consequences if one runs several deletions at once or if
+one resubmits the same deletion command several times, with or without
+canceling other deletions that may be concurrent.
+
+These commands have a ``dry-run`` mode that is the default.  The
+command is basically optimize to not delete data except in a very
+specific circumstance to avoid operator error.  Should a dry-run be
+performed, ``wal-e`` will instead simply report every key it would
+otherwise delete if it was not running in dry-run mode, along with
+prominent HINT-lines for every key noting that nothing was actually
+deleted from S3.
+
+To *actually* delete any data, one must pass ``--confirm`` to ``wal-e
+delete``.  If one passes both ``--dry-run`` and ``--confirm``, a dry
+run will be performed, regardless of the order of options passed.
+
+Currently, these kinds of deletions are supported.  Examples omit
+environment variable configuration for clarity:
+
+* ``before``: Delete all backups and wal segment files before the
+  given base-backup name.  This does not include the base backup
+  passed: it will remain a viable backup.
+
+  Example::
+
+    $ wal-e delete [--confirm] before base_00000004000002DF000000A6_03626144
+
+* ``old-versions``: Delete all backups and wal file segments with an
+  older format.  This is only intended to be run after a major WAL-E
+  version upgrade and the subsequent base-backup.  If no base backup
+  is successfully performed first, one is more exposed to data loss
+  until one does perform a base backup.
+
+  Example::
+
+    $ wal-e delete [--confirm] old-versions
+
+* ``everything``: Delete all backups and wal file segments in the
+  context.  This is appropriate if one is decommissioning a database
+  and has no need for its archives.
+
+  Example::
+
+    $ wal-e delete [--confirm] everything
+
+
 Compression and Temporary Files
 -------------------------------
 
@@ -165,9 +329,9 @@ All assets pushed to S3 are run through the program "lzop" which
 compresses the object using the very fast lzo compression algorithm.
 It takes roughly 2 CPU seconds to compress a gigabyte, which when
 sending things to S3 at about 25MB/s occupies about 5% CPU time.
-Compression ratios are expected to make file sizes 10%-30% of the
-original file size, making backups and restorations considerably
-faster.
+Compression ratios are expected to make file sizes 50% or less of the
+original file size in most cases, making backups and restorations
+considerably faster.
 
 Because S3 requires the Content-Length header of a stored object to be
 set up-front, it is necessary to completely finish compressing an
@@ -186,7 +350,7 @@ Controlling the I/O of a Base Backup
 ------------------------------------
 
 To reduce the read load on base backups, they are sent through the
-tool "mbuffer" first.  To use this rate-limited-read mode, use the
+tool ``mbuffer`` first.  To use this rate-limited-read mode, use the
 option --cluster-read-rate-limit as seen in ``wal-e backup-push``.
 
 
@@ -197,8 +361,7 @@ TODO
   hurt more.
 * WAL-E is expanding. A README is starting to get unwieldy.  A proper
   Sphinx manual should be written soon
-* The the retry logic in boto and the exceptions it raises are not
-  know to me, and may defeat WAL-E's retry logic.
+* Retry logic can use a lot of help.
 * Investigate pg_lesslog.  This tool strips the WAL file of full-page
   binary images, making it *much* smaller, but this also makes the
   recovery process more expensive (has to do more seeking to do
@@ -208,22 +371,10 @@ TODO
 * Sane error messages, such as on Ctrl-C or during errors.
 * Pipeline-WAL-Segment Management: S3 ACK is long enough that a
   totally non-pipelined, non-parallel archive_command can fall behind.
-* Eliminate some copy-pasta from interrupt-processing with
-  multiprocessing pools
 * Eliminate copy-pasta in formatting URLs for getting/putting things
 * do_lzop_s3_get do_lzop_s3_push, do_partition_put, do_partition_get
   should probably share more code, since they take common arguments.
-* Write a new class to handle addressing paths of a WAL-E context: its
-  base backups and WAL segments.
 * Verify Tar paths instead of using tarfile.extractall()
-* Handle shrinking files gracefully (growing files are already handled
-  gracefully).  This is because the tarfile module's copyfileobj
-  procedure raises an exception if the file has been truncated.
-  Unfortunately the best solution I can see is to cook up a custom
-  tarfile.addfile() equivalent.
-* Handle unlinked-file race conditions gracefully
-* Consider replacing s3cmd with boto, as metadata checking
-  requirements become more elaborate.
 * For small databases, the --cluster-rate-limit feature will
   over-restrict the amount of disk bandwidth used: the number provided
   by the user is divided by the number of processes that can

@@ -5,30 +5,34 @@ These are functions that are amenable to be called from other modules,
 with the intention that they are used in forked worker processes.
 
 """
+import boto
 import errno
+import functools
 import gevent
 import json
+import logging
+import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+import traceback
 
 import wal_e.storage.s3_storage as s3_storage
 import wal_e.log_help as log_help
 
 from wal_e.exception import UserException, UserCritical
-from wal_e.log_help import fmt_logline
 from wal_e.piper import pipe, pipe_wait, popen_sp, PIPE
-from wal_e.worker import retry_iter
 
 
-logger = log_help.get_logger(__name__)
+logger = log_help.WalELogger(__name__, level=logging.INFO)
 
 
 LZOP_BIN = 'lzop'
-S3CMD_BIN = 's3cmd'
 MBUFFER_BIN = 'mbuffer'
 
 
@@ -38,201 +42,281 @@ MBUFFER_BIN = 'mbuffer'
 # unhappy with too much memory usage in buffers.
 BUFSIZE_HT = 128 * 8192
 
+generic_weird_key_hint_message = ('This means an unexpected key was found in a '
+                                  'WAL-E prefix.  It can be harmless, or the '
+                                  'result a bug or misconfiguration.')
 
-def check_call_wait_sigint(*popenargs, **kwargs):
-    got_sigint = False
-    wait_sigint_proc = None
+# Set a timeout for boto HTTP operations should no timeout be set.
+# Yes, in the case the user *wanted* no timeouts, this would set one.
+# If that becomes a problem, someone should post a bug, although I am
+# having a hard time imagining why that behavior could ever be useful.
+if not boto.config.has_option('Boto', 'http_socket_timeout'):
+    if not boto.config.has_section('Boto'):
+        boto.config.add_section('Boto')
 
-    try:
-        wait_sigint_proc = popen_sp(*popenargs, **kwargs)
-    except KeyboardInterrupt, e:
-        got_sigint = True
-        if wait_sigint_proc is not None:
-            wait_sigint_proc.send_signal(signal.SIGINT)
-            wait_sigint_proc.wait()
-            raise e
-    finally:
-        if wait_sigint_proc and not got_sigint:
-            wait_sigint_proc.wait()
-
-            if wait_sigint_proc.returncode != 0:
-                # Try to identify the argv sent via 'popenargs' and
-                # kwargs sent to subprocess.Popen: this can be sent
-                # positionally, or in the form of kwargs.
-                if len(popenargs) > 0:
-                    raise subprocess.CalledProcessError(
-                        wait_sigint_proc.returncode, popenargs[0])
-                elif 'args' in kwargs:
-                    raise subprocess.CalledProcessError(
-                        wait_sigint_proc.returncode, kwargs['args'])
-                else:
-                    assert False
-            else:
-                return wait_sigint_proc.returncode
+    boto.config.set('Boto', 'http_socket_timeout', '5')
 
 
-def do_partition_put(backup_s3_prefix, tpart_number, tpart, rate_limit,
-                     s3cmd_config_path):
+def generic_exception_processor(exc_tup, **kwargs):
+    logger.warning(
+        msg='retrying after encountering exception',
+        detail=('Exception information dump: \n{0}'
+                .format(''.join(traceback.format_exception(*exc_tup)))),
+        hint=('A better error message should be written to '
+              'handle this exception.  Please report this output and, '
+              'if possible, the situation under which it arises.'))
+    del exc_tup
+
+
+def retry(exception_processor=generic_exception_processor):
+    """
+    Generic retry decorator
+
+    Tries to call the decorated function.  Should no exception be
+    raised, the value is simply returned, otherwise, call an
+    exception_processor function with the exception (type, value,
+    traceback) tuple (with the intention that it could raise the
+    exception without losing the traceback) and the exception
+    processor's optionally usable context value (exc_processor_cxt).
+
+    It's recommended to delete all references to the traceback passed
+    to the exception_processor to speed up garbage collector via the
+    'del' operator.
+
+    This context value is passed to and returned from every invocation
+    of the exception processor.  This can be used to more conveniently
+    (vs. an object with __call__ defined) implement exception
+    processors that have some state, such as the 'number of attempts'.
+    The first invocation will pass None.
+
+    :param f: A function to be retried.
+    :type f: function
+
+    :param exception_processor: A function to process raised
+                                exceptions.
+    :type exception_processor: function
+
+    """
+
+    def yield_new_function_from(f):
+        def shim(*args, **kwargs):
+            exc_processor_cxt = None
+
+            while True:
+                try:
+                    return f(*args, **kwargs)
+                except:
+                    exception_info_tuple = None
+
+                    try:
+                        exception_info_tuple = sys.exc_info()
+                        exc_processor_cxt = exception_processor(
+                            exception_info_tuple,
+                            exc_processor_cxt=exc_processor_cxt)
+                    finally:
+                        # Although cycles are harmless long-term, help the
+                        # garbage collector.
+                        del exception_info_tuple
+        return functools.wraps(f)(shim)
+    return yield_new_function_from
+
+
+def uri_put_file(s3_uri, fp, content_encoding=None):
+
+    # XXX: disable validation as a kludge to get around use of
+    # upper-case bucket names.
+    suri = boto.storage_uri(s3_uri, validate=False)
+    k = suri.new_key()
+
+    if content_encoding is not None:
+        k.content_type = content_encoding
+
+    k.set_contents_from_file(fp)
+    return k
+
+
+def compute_kib_per_second(start, finish, amount_in_bytes):
+    return (amount_in_bytes / 1024) / (finish - start)
+
+
+def do_partition_put(backup_s3_prefix, tpart, rate_limit):
     """
     Synchronous version of the s3-upload wrapper
 
-    Nominally intended to be used through a pool, but exposed here
-    for testing and experimentation.
-
     """
-    import wal_e.piper
-    wal_e.piper.BRUTAL_AVOID_NONBLOCK_HACK = True
+    logger.info(msg='beginning volume compression')
 
-    with tempfile.NamedTemporaryFile(mode='w') as tf:
+    with tempfile.NamedTemporaryFile(mode='rwb') as tf:
         compression_p = popen_sp([LZOP_BIN, '--stdout'],
                                  stdin=subprocess.PIPE, stdout=tf,
                                  bufsize=BUFSIZE_HT)
         tpart.tarfile_write(compression_p.stdin, rate_limit=rate_limit)
         compression_p.stdin.flush()
         compression_p.stdin.close()
-        compression_p.wait()
+
+        # Poll for process completion, avoid .wait() as to allow other
+        # greenlets a chance to execute.  Calling .wait() will result
+        # in deadlock.
+        while True:
+            if compression_p.poll() is not None:
+                break
+            else:
+                # Give other stacks a chance to continue progress
+                gevent.sleep(0.1)
+
         if compression_p.returncode != 0:
             raise UserCritical(
-                'could not properly compress tar partition',
-                'The partition failed is {tpart_number}.  '
+                'could not properly compress tar',
+                'The volume that failed is {volume}.  '
                 'It has the following manifest:\n  '
                 '{error_manifest}'
                 .format(error_manifest=tpart.format_manifest(),
-                        tpart_number=tpart_number))
-
-        # Not to be confused with fsync: the point is to make
-        # sure any Python-buffered output is visible to other
-        # processes, but *NOT* force a write to disk.
+                        volume=tpart.name))
         tf.flush()
 
-        check_call_wait_sigint(
-            [S3CMD_BIN, '-c', s3cmd_config_path, 'put', tf.name,
-             '/'.join([backup_s3_prefix, 'tar_partitions',
-                       'part_{tpart_number}.tar.lzo'.format(
-                            tpart_number=tpart_number)])])
+        s3_url = '/'.join([backup_s3_prefix, 'tar_partitions',
+                           'part_{number}.tar.lzo'
+                           .format(number=tpart.name)])
+
+        logger.info(
+            msg='begin uploading a base backup volume',
+            detail=('Uploading to "{s3_url}".')
+            .format(s3_url=s3_url))
+
+        def put_volume_exception_processor(exc_tup, exc_processor_cxt):
+            typ, value, tb = exc_tup
+
+            # Screen for certain kinds of known-errors to retry
+            # from
+            if issubclass(typ, socket.error):
+                # This branch is for conditions that are retry-able.
+                if value[0] == errno.ECONNRESET:
+                    # "Connection reset by peer"
+                    if exc_processor_cxt is None:
+                        exc_processor_cxt = 1
+                    else:
+                        exc_processor_cxt += 1
+
+                    logger.info(
+                        msg='Connection reset detected, retrying send',
+                        detail=('There have been {n} attempts to send the '
+                                'volume {name} so far.'
+                                .format(n=exc_processor_cxt,
+                                        name=tpart.name)))
+
+                    return exc_processor_cxt
+            else:
+                # This type of error is unrecognized as a
+                # retry-able condition, so propagate it, original
+                # stacktrace and all.
+                raise typ, value, tb
+
+        @retry(put_volume_exception_processor)
+        def put_file_helper():
+            return uri_put_file(s3_url, tf)
+
+        # Actually do work, retrying if necessary, and timing how long
+        # it takes.
+        clock_start = time.clock()
+        k = put_file_helper()
+        clock_finish = time.clock()
+
+        kib_per_second = compute_kib_per_second(clock_start, clock_finish,
+                                                k.size)
+        logger.info(
+            msg='finish uploading a base backup volume',
+            detail=('Uploading to "{s3_url}" complete at '
+                    '{kib_per_second:02g}KiB/s. ')
+            .format(s3_url=s3_url, kib_per_second=kib_per_second))
 
 
-def do_lzop_s3_put(s3_url, path, s3cmd_config_path):
+def do_lzop_s3_put(s3_url, local_path):
     """
-    Synchronous version of the s3-upload wrapper
+    Compress and upload a given local path.
 
-    Nominally intended to be used through a pool, but exposed here
-    for testing and experimentation.
+    :type s3_url: string
+    :param s3_url: A s3://bucket/key style URL that is the destination
+
+    :type local_path: string
+    :param local_path: a path to a file to be compressed
 
     """
-    import wal_e.piper
-    wal_e.piper.BRUTAL_AVOID_NONBLOCK_HACK = True
 
-    with tempfile.NamedTemporaryFile(mode='w') as tf:
-        compression_p = popen_sp([LZOP_BIN, '--stdout', path], stdout=tf,
+    assert not s3_url.endswith('.lzo')
+    s3_url += '.lzo'
+
+    with tempfile.NamedTemporaryFile(mode='rwb') as tf:
+        compression_p = popen_sp([LZOP_BIN, '--stdout', local_path], stdout=tf,
                                  bufsize=BUFSIZE_HT)
         compression_p.wait()
 
         if compression_p.returncode != 0:
             raise UserCritical(
-                'could not properly compress heap file',
-                'the heap file is at {path}'.format(path=path))
+                'could not properly compress file',
+                'the file is at {path}'.format(path=local_path))
 
-        # Not to be confused with fsync: the point is to make
-        # sure any Python-buffered output is visible to other
-        # processes, but *NOT* force a write to disk.
         tf.flush()
 
-        check_call_wait_sigint([S3CMD_BIN, '-c', s3cmd_config_path,
-                                'put', tf.name, s3_url + '.lzo'])
+        logger.info(msg='begin archiving a file',
+                    detail=('Uploading "{local_path}" to "{s3_url}".'
+                            .format(**locals())))
+
+        clock_start = time.clock()
+        k = uri_put_file(s3_url, tf)
+        clock_finish = time.clock()
+
+        kib_per_second = compute_kib_per_second(clock_start, clock_finish,
+                                                k.size)
+        logger.info(
+            msg='completed archiving to a file ',
+            detail=('Archiving to "{s3_url}" complete at '
+                    '{kib_per_second:02g}KiB/s. ')
+            .format(s3_url=s3_url, kib_per_second=kib_per_second))
 
 
-def do_lzop_s3_get(s3_url, path, s3cmd_config_path):
+def do_lzop_s3_get(s3_url, path):
     """
     Get and decompress a S3 URL
 
-    This streams the s3cmd directly to lzop; the compressed version is
-    never stored on disk.
+    This streams the content directly to lzop; the compressed version
+    is never stored on disk.
 
     """
-    import wal_e.piper
-    wal_e.piper.BRUTAL_AVOID_NONBLOCK_HACK = True
-
     assert s3_url.endswith('.lzo'), 'Expect an lzop-compressed file'
 
-    with open(path, 'wb') as decomp_out:
-        popens = []
-
+    # XXX: Refactor: copied out of BackupFetcher, so that's a pity...
+    def _write_and_close(key, lzod):
         try:
-            popens = pipe(
-                dict(args=[S3CMD_BIN, '-c', s3cmd_config_path,
-                           'get', s3_url, '-'],
-                     bufsize=BUFSIZE_HT),
-                dict(args=[LZOP_BIN, '-d'], stdout=decomp_out,
-                     bufsize=BUFSIZE_HT))
-            pipe_wait(popens)
+            key.get_contents_to_file(lzod.input_fp)
+        finally:
+            lzod.input_fp.flush()
+            lzod.input_fp.close()
 
-            s3cmd_proc, lzop_proc = popens
+    with open(path, 'wb') as decomp_out:
+        suri = boto.storage_uri(s3_url, validate=False)
+        key = suri.get_key()
 
-            def check_exitcode(cmdname, popen):
-                if popen.returncode != 0:
-                    raise UserException(
-                        'downloading a wal file has failed',
-                        cmdname + ' terminated with exit code: ' +
-                        unicode(s3cmd_proc.returncode))
+        lzod = StreamLzoDecompressionPipeline(stdout=decomp_out)
+        g = gevent.spawn(_write_and_close, key, lzod)
 
-            check_exitcode('s3cmd', s3cmd_proc)
-            check_exitcode('lzop', lzop_proc)
+        # Raise any exceptions from _write_and_close
+        g.get()
 
-            print >>sys.stderr, ('Got and decompressed file: '
-                                 '{s3_url} to {path}'
-                                 .format(**locals()))
-        except KeyboardInterrupt, keyboard_int:
-            for popen in popens:
-                try:
-                    popen.send_signal(signal.SIGINT)
-                    popen.wait()
-                except OSError, e:
-                    # ESRCH aka "no such process"
-                    if e.errno != errno.ESRCH:
-                        raise e
+        # Blocks on lzo exiting and raises an exception if the
+        # exit status it non-zero.
+        lzod.finish()
 
-            raise keyboard_int
-
-
-def bucket_lister(bucket, retry_count, timeout_seconds,
-                  prefix='', delimiter='', marker='', headers=None):
-    """
-    A generator function for listing keys in a bucket.
-
-    Adapted from bucketlistresultset.py in Boto, but to use gevent
-    timeouts.
-    """
-    more_results = True
-    k = None
-    while more_results:
-        rs = None
-        for i in retry_iter(retry_count):
-            with gevent.Timeout(timeout_seconds, False):
-                rs = bucket.get_all_keys(prefix=prefix, marker=marker,
-                                         delimiter=delimiter, headers=headers)
-
-        if rs is None:
-            raise UserException(msg='attempt to list bucket timed out',
-                                hint='try raising the number of retries, '
-                                'the length of the timeout, or try again '
-                                'later')
-
-        for k in rs:
-            yield k
-        if k:
-            marker = k.name
-        more_results = rs.is_truncated
+        logger.info(
+            msg='completed download and decompression',
+            detail='Downloaded and decompressed "{s3_url}" to "{path}"'
+            .format(s3_url=s3_url, path=path))
 
 
 class StreamLzoDecompressionPipeline(object):
-    def __init__(self):
-        # NB: This strategy works semi-reasonably because popen_sp
-        # uses nonblocking pipes, and thus 'write' does not block and
-        # uses greenlet to yield.
+    def __init__(self, stdin=PIPE, stdout=PIPE):
         self._decompression_p = popen_sp(
             [LZOP_BIN, '-d', '--stdout', '-'],
-            stdin=PIPE, stdout=PIPE,
+            stdin=stdin, stdout=stdout,
             bufsize=BUFSIZE_HT)
 
     @property
@@ -245,60 +329,53 @@ class StreamLzoDecompressionPipeline(object):
 
     def finish(self):
         retcode = self._decompression_p.wait()
-        self.output_fp.close()
 
-        assert self.input_fp.closed
-        assert self.output_fp.closed
+        if self.output_fp is not None:
+            self.output_fp.close()
+
+        assert self.input_fp is None or self.input_fp.closed
+        assert self.output_fp is None or self.output_fp.closed
+
         if retcode != 0:
-            logger.info(fmt_logline(
-                    msg='decompression process did not exit gracefully',
-                    detail='"lzop" had terminated with the exit status {0}.'
-                    .format(retcode)))
+            raise UserCritical(
+                msg='decompression process did not exit gracefully',
+                detail='"lzop" had terminated with the exit status {0}.'
+                .format(retcode))
 
 
 class TarPartitionLister(object):
-    def __init__(self, s3_conn, layout, backup_info, list_retry, list_timeout):
+    def __init__(self, s3_conn, layout, backup_info):
         self.s3_conn = s3_conn
         self.layout = layout
         self.backup_info = backup_info
-        self.list_retry = list_retry
-        self.list_timeout = list_timeout
 
     def __iter__(self):
         prefix = self.layout.basebackup_tar_partition_directory(
             self.backup_info)
 
-        # XXX: seen elsewhere, factor this out
-        bucket = None
-        for i in retry_iter(self.list_retry):
-            with gevent.Timeout(self.list_timeout, False) as timeout:
-                bucket = self.s3_conn.get_bucket(self.layout.bucket_name())
-
-        for key in bucket_lister(bucket, self.list_retry, self.list_timeout,
-                                 prefix=prefix):
-            yield key.name.rsplit('/', 1)[-1]
+        bucket = self.s3_conn.get_bucket(self.layout.bucket_name())
+        for key in bucket.list(prefix=prefix):
+            url = 's3://{bucket}/{name}'.format(bucket=key.bucket.name,
+                                                name=key.name)
+            key_last_part = key.name.rsplit('/', 1)[-1]
+            match = re.match(s3_storage.VOLUME_REGEXP, key_last_part)
+            if match is None:
+                logger.warning(msg=('unexpected key found in tar volume '
+                                    'directory'),
+                               detail=('The unexpected key is stored at "{0}".'
+                                       .format(url)),
+                               hint=generic_weird_key_hint_message)
+            else:
+                yield key_last_part
 
 
 class BackupFetcher(object):
-    def __init__(self, s3_conn, layout, backup_info, local_root,
-                 partition_retry, partition_timeout):
+    def __init__(self, s3_conn, layout, backup_info, local_root):
         self.s3_conn = s3_conn
         self.layout = layout
         self.local_root = local_root
         self.backup_info = backup_info
-        self.partition_retry = partition_retry
-        self.partition_timeout = partition_timeout
-
-        # XXX: seen elsewhere, factor this out
-        self.bucket = None
-        for i in retry_iter(self.partition_retry):
-            with gevent.Timeout(self.partition_timeout, False) as timeout:
-                self.bucket = self.s3_conn.get_bucket(self.layout.bucket_name())
-            if self.bucket is not None:
-                break
-
-        if self.bucket is None:
-            raise UserException(msg='could not verify S3 bucket')
+        self.bucket = self.s3_conn.get_bucket(self.layout.bucket_name())
 
     def _write_and_close(self, key, lzod):
         try:
@@ -307,75 +384,41 @@ class BackupFetcher(object):
             lzod.input_fp.flush()
             lzod.input_fp.close()
 
+    @retry()
     def fetch_partition(self, partition_name):
         part_abs_name = self.layout.basebackup_tar_partition(
             self.backup_info, partition_name)
 
-        for i in retry_iter(self.partition_retry):
-            logger.info(fmt_logline(
-                    msg='beginning partition download',
-                    detail='The partition being downloaded is {0}.'
-                    .format(partition_name),
-                    hint='The absolute S3 key is {0}.'.format(part_abs_name)))
-            try:
-                with gevent.Timeout(self.partition_timeout) as timeout:
-                    key = self.bucket.get_key(part_abs_name)
-            except gevent.Timeout:
-                continue
+        logger.info(
+            msg='beginning partition download',
+            detail='The partition being downloaded is {0}.'
+            .format(partition_name),
+            hint='The absolute S3 key is {0}.'.format(part_abs_name))
 
-            if key is None:
-                raise UserCritical(
-                    msg='expected tar partition not found',
-                    detail='The tar partition "{0}" could '
-                    'not be located.'.format(part_abs_name))
+        key = self.bucket.get_key(part_abs_name)
+        lzod = StreamLzoDecompressionPipeline()
+        g = gevent.spawn(self._write_and_close, key, lzod)
+        tar = tarfile.open(mode='r|', fileobj=lzod.output_fp)
 
-            good = False
-            try:
-                lzod = StreamLzoDecompressionPipeline()
-                g = gevent.spawn(self._write_and_close, key, lzod)
-                tar = tarfile.open(mode='r|', fileobj=lzod.output_fp)
+        # TODO: replace with per-member file handling,
+        # extractall very much warned against in the docs, and
+        # seems to have changed between Python 2.6 and Python
+        # 2.7.
+        tar.extractall(self.local_root)
+        tar.close()
 
-                # TODO: replace with per-member file handling,
-                # extractall very much warned against in the docs, and
-                # seems to have changed between Python 2.6 and Python
-                # 2.7.
-                tar.extractall(self.local_root)
-                tar.close()
+        # Raise any exceptions from self._write_and_close
+        g.get()
 
-                # Raise any exceptions from self._write_and_close
-                g.get()
-
-                # Blocks on lzo exiting and raises an exception if the
-                # exit status it non-zero.
-                lzod.finish()
-                good = True
-            finally:
-                if good:
-                    return
-                else:
-                    assert not good
-                    logger.info(fmt_logline(
-                            msg='retrying partition download',
-                            detail='The partition being downloaded is {0}.'
-                            .format(partition_name)))
-
-        raise UserCritical(msg='failed to download partition {0}'
-                           .format(partition_name))
-
+        # Blocks on lzo exiting and raises an exception if the
+        # exit status it non-zero.
+        lzod.finish()
 
 class BackupList(object):
-    def __init__(self, s3_conn, layout,
-
-                 # These can learn default values when necessary
-                 detail, detail_retry, detail_timeout, list_retry,
-                 list_timeout):
+    def __init__(self, s3_conn, layout, detail):
         self.s3_conn = s3_conn
         self.layout = layout
         self.detail = detail
-        self.detail_retry = detail_retry
-        self.detail_timeout = detail_timeout
-        self.list_retry = list_retry
-        self.list_timeout = list_timeout
 
     def find_all(self, query):
         """
@@ -396,67 +439,37 @@ class BackupList(object):
             for backup in iter(self):
                 if backup.name == query:
                     yield backup
-                    return
         elif query == 'LATEST':
             all_backups = list(iter(self))
 
-            if all_backups is None:
+            if not all_backups:
                 yield None
                 return
 
+            assert len(all_backups) > 0
+
             all_backups.sort()
             yield all_backups[-1]
-            return
         else:
             raise UserException(msg='invalid backup query submitted',
                                 detail='The submitted query operator was "{0}."'
                                 .format(query))
 
     def _backup_detail(self, key):
-        contents = None
-        for i in retry_iter(self.detail_retry):
-            with gevent.Timeout(self.detail_timeout, False) as timeout:
-                contents = key.get_contents_as_string()
-
-            logger.debug('Retrying backup detail attempt: #{0}'.format(i))
-
-        if contents is None:
-            # Abuse gevent timeout to raise some sort of exception to
-            # the caller
-            raise gevent.Timeout(self.detail_timeout)
-        else:
-            return contents
-
+        return key.get_contents_as_string()
 
     def __iter__(self):
-        # Abuse pagination timeouts to also verify the bucket.  Close
-        # enough.(?)
-        bucket = None
-        for i in retry_iter(self.list_retry):
-            with gevent.Timeout(self.list_timeout, False) as timeout:
-                bucket = self.s3_conn.get_bucket(self.layout.bucket_name())
-
-        if bucket is None:
-            raise UserException(msg='could not verify bucket',
-                                detail='Could not verify bucket {0}.'
-                                .format(self.layout.s3_bucket_name()),
-                                hint='Consider raising the timeout, number '
-                                'of retries, or trying again later.')
+        bucket = self.s3_conn.get_bucket(self.layout.bucket_name())
 
         # Try to identify the sentinel file.  This is sort of a drag, the
         # storage format should be changed to put them in their own leaf
         # directory.
         #
         # TODO: change storage format
-        base_depth = self.layout.basebackups().count('/')
-        sentinel_depth = base_depth + 1
-
+        sentinel_depth = self.layout.basebackups().count('/')
         matcher = re.compile(s3_storage.COMPLETE_BASE_BACKUP_REGEXP).match
 
-        # bucket_lister performs auto-pagination, which costs one web
-        # request per page.
-        for key in bucket_lister(bucket, self.list_retry, self.list_timeout,
-                                 prefix=self.layout.basebackups()):
+        for key in bucket.list(prefix=self.layout.basebackups()):
             # Use key depth vs. base and regexp matching to find
             # sentinel files.
             key_depth = key.name.count('/')
@@ -492,10 +505,226 @@ class BackupList(object):
                                 detail_dict[k] = 'timeout'
 
                     info = s3_storage.BackupInfo(
-                        name='base_{segment}_{offset}'.format(**groups),
+                        name='base_{filename}_{offset}'.format(**groups),
                         last_modified=key.last_modified,
-                        wal_segment_backup_start=groups['segment'],
+                        wal_segment_backup_start=groups['filename'],
                         wal_segment_offset_backup_start=groups['offset'],
                         **detail_dict)
 
                     yield info
+
+
+class DeleteFromContext(object):
+    def __init__(self, s3_conn, layout, dry_run):
+        self.s3_conn = s3_conn
+        self.dry_run = dry_run
+        self.layout = layout
+
+        assert self.dry_run in (True, False)
+
+    @retry()
+    def _maybe_delete_key(self, key, type_of_thing):
+        url = 's3://{bucket}/{name}'.format(bucket=key.bucket.name,
+                                            name=key.name)
+        log_message = dict(
+            msg='deleting {0}'.format(type_of_thing),
+            detail='The key being deleted is {url}.'.format(url=url))
+
+        if self.dry_run is False:
+            logger.info(**log_message)
+            key.delete()
+        elif self.dry_run is True:
+            log_message['hint'] = ('This is only a dry run -- no actual data '
+                                   'is being deleted')
+            logger.info(**log_message)
+        else:
+            assert False
+
+    def delete_everything(self):
+        """
+        Delete everything in a storage layout
+
+        Named provocatively for a reason: can (and in fact intended
+        to) cause irrecoverable loss of data.  This can be used to:
+
+        * Completely obliterate data from old WAL-E versions
+          (i.e. layout.VERSION is an obsolete version)
+
+        * Completely obliterate all backups (from a decommissioned
+          database, for example)
+
+        """
+        bucket = self.s3_conn.get_bucket(self.layout.bucket_name())
+
+        for key in bucket.list(prefix=self.layout.basebackups()):
+            self._maybe_delete_key(key, 'part of a base backup')
+
+        for key in bucket.list(prefix=self.layout.wal_directory()):
+            self._maybe_delete_key(key, 'part of wal logs')
+
+    def delete_before(self, segment_info):
+        """
+        Delete all base backups and WAL before a given segment
+
+        This is the most commonly-used deletion operator; to delete
+        old backups and WAL.
+
+        """
+        bucket = self.s3_conn.get_bucket(self.layout.bucket_name())
+
+        base_backup_sentinel_depth = self.layout.basebackups().count('/') + 1
+        version_depth = base_backup_sentinel_depth + 1
+        volume_backup_depth = version_depth + 1
+
+        def groupdict_to_segment_number(d):
+            return s3_storage.SegmentNumber(log=d['log'], seg=d['seg'])
+
+        def delete_if_qualifies(delete_horizon_segment_number,
+                                scanned_segment_number,
+                                key, type_of_thing):
+            if scanned_sn.as_an_integer < segment_info.as_an_integer:
+                self._maybe_delete_key(key, type_of_thing)
+
+        # The base-backup sweep, deleting bulk data and metadata, but
+        # not any wal files.
+        for key in bucket.list(prefix=self.layout.basebackups()):
+            url = 's3://{bucket}/{name}'.format(bucket=key.bucket.name,
+                                                name=key.name)
+            key_parts = key.name.split('/')
+            key_depth = len(key_parts)
+
+            if key_depth not in (base_backup_sentinel_depth, version_depth,
+                                 volume_backup_depth):
+                # Check depth (in terms of number of
+                # slashes/delimiters in the key); if there exists a
+                # key with an unexpected depth relative to the
+                # context, complain a little bit and move on.
+                logger.warning(
+                    msg="skipping non-qualifying key in 'delete before'",
+                    detail=('The unexpected key is "{0}", and it appears to be '
+                            'at an unexpected depth.'.format(url)),
+                    hint=generic_weird_key_hint_message)
+            elif key_depth == base_backup_sentinel_depth:
+                # This is a key at the base-backup-sentinel file
+                # depth, so check to see if it matches the known form.
+                match = re.match(s3_storage.COMPLETE_BASE_BACKUP_REGEXP,
+                                 key_parts[-1])
+                if match is None:
+                    # This key was at the level for a base backup
+                    # sentinel, but doesn't match the known pattern.
+                    # Complain about this, and move on.
+                    logger.warning(
+                        msg="skipping non-qualifying key in 'delete before'",
+                        detail=('The unexpected key is "{0}", and it appears '
+                                'not to match the base-backup sentinel '
+                                'pattern.'.format(url)),
+                        hint=generic_weird_key_hint_message)
+                else:
+                    # This branch actually might delete some data: the
+                    # key is at the right level, and matches the right
+                    # form.  The last check is to make sure it's in
+                    # the range of things to delete, and if that is
+                    # the case, attempt deletion.
+                    assert match is not None
+                    scanned_sn = groupdict_to_segment_number(match.groupdict())
+                    delete_if_qualifies(segment_info, scanned_sn, key,
+                                        'a base backup sentinel file')
+            elif key_depth == version_depth:
+                match = re.match(
+                    s3_storage.BASE_BACKUP_REGEXP, key_parts[-2])
+
+                if match is None or key_parts[-1] != 'extended_version.txt':
+                    logger.warning(
+                        msg="skipping non-qualifying key in 'delete before'",
+                        detail=('The unexpected key is "{0}", and it appears '
+                                'not to match the extended-version backup '
+                                'pattern.'.format(url)),
+                        hint=generic_weird_key_hint_message)
+                else:
+                    assert match is not None
+                    scanned_sn = groupdict_to_segment_number(match.groupdict())
+                    delete_if_qualifies(segment_info, scanned_sn, key,
+                                        'a extended version metadata file')
+            elif key_depth == volume_backup_depth:
+                # This has the depth of a base-backup volume, so try
+                # to match the expected pattern and delete it if the
+                # pattern matches and the base backup part qualifies
+                # properly.
+                assert len(key_parts) >= 2, ('must be a logical result of the '
+                                             's3 storage layout')
+
+                match = re.match(
+                    s3_storage.BASE_BACKUP_REGEXP, key_parts[-3])
+
+                if match is None or key_parts[-2] != 'tar_partitions':
+                    logger.warning(
+                        msg="skipping non-qualifying key in 'delete before'",
+                        detail=('The unexpected key is "{0}", and it appears '
+                                'not to match the base-backup partition pattern.'
+                                .format(url)),
+                        hint=generic_weird_key_hint_message)
+                else:
+                    assert match is not None
+                    scanned_sn = groupdict_to_segment_number(match.groupdict())
+                    delete_if_qualifies(segment_info, scanned_sn, key,
+                                        'a base backup volume')
+            else:
+                assert False
+
+        # the WAL-file sweep, deleting only WAL files, and not any
+        # base-backup information.
+        wal_key_depth = self.layout.wal_directory().count('/') + 1
+        for key in bucket.list(prefix=self.layout.wal_directory()):
+            url = 's3://{bucket}/{name}'.format(bucket=key.bucket.name,
+                                                name=key.name)
+            key_parts = key.name.split('/')
+            key_depth = len(key_parts)
+            if key_depth != wal_key_depth:
+                logger.warning(
+                    msg="skipping non-qualifying key in 'delete before'",
+                    detail=('The unexpected key is "{0}", and it appears to be '
+                            'at an unexpected depth.'.format(url)),
+                    hint=generic_weird_key_hint_message)
+            elif key_depth == wal_key_depth:
+                segment_match = (re.match(s3_storage.SEGMENT_REGEXP + r'\.lzo',
+                                          key_parts[-1]))
+                label_match = (re.match(s3_storage.SEGMENT_REGEXP +
+                                        r'\.[A-F0-9]{8,8}.backup.lzo',
+                                        key_parts[-1]))
+                history_match = re.match(r'[A-F0-9]{8,8}\.history',
+                                         key_parts[-1])
+
+                all_matches = [segment_match, label_match, history_match]
+
+                non_matches = len(list(m for m in all_matches if m is None))
+
+                # These patterns are intended to be mutually
+                # exclusive, so either one should match or none should
+                # match.
+                assert non_matches in (len(all_matches) - 1, len(all_matches))
+                if non_matches == len(all_matches):
+                    logger.warning(
+                        msg="skipping non-qualifying key in 'delete before'",
+                        detail=('The unexpected key is "{0}", and it appears '
+                                'not to match the WAL file naming pattern.'
+                                .format(url)),
+                        hint=generic_weird_key_hint_message)
+                elif segment_match is not None:
+                    scanned_sn = groupdict_to_segment_number(
+                        segment_match.groupdict())
+                    delete_if_qualifies(segment_info, scanned_sn, key,
+                                        'a wal file')
+                elif label_match is not None:
+                    scanned_sn = groupdict_to_segment_number(
+                        label_match.groupdict())
+                    delete_if_qualifies(segment_info, scanned_sn, key,
+                                        'a backup history file')
+                elif history_match is not None:
+                    # History (timeline) files do not have any actual
+                    # WAL position information, so they are never
+                    # deleted.
+                    pass
+                else:
+                    assert False
+            else:
+                assert False
