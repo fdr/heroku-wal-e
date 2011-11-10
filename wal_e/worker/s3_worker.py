@@ -199,6 +199,9 @@ def do_partition_put(backup_s3_prefix, tpart, rate_limit):
 
             typ, value, tb = exc_tup
 
+            if exc_processor_cxt is None:
+                exc_processor_cxt = increment_context(exc_processor_cxt)
+
             # Screen for certain kinds of known-errors to retry from
             if issubclass(typ, socket.error):
                 socketmsg = value[1] if isinstance(value, tuple) else value
