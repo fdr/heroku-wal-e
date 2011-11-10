@@ -135,8 +135,11 @@ def uri_put_file(s3_uri, fp, content_encoding=None):
     return k
 
 
-def compute_kib_per_second(start, finish, amount_in_bytes):
-    return (amount_in_bytes / 1024) / (finish - start)
+def format_kib_per_second(start, finish, amount_in_bytes):
+    try:
+        return '{0:02g}'.format((amount_in_bytes / 1024) / (finish - start))
+    except ZeroDivisionError:
+        return 'NaN'
 
 
 def do_partition_put(backup_s3_prefix, tpart, rate_limit):
@@ -144,7 +147,8 @@ def do_partition_put(backup_s3_prefix, tpart, rate_limit):
     Synchronous version of the s3-upload wrapper
 
     """
-    logger.info(msg='beginning volume compression')
+    logger.info(msg='beginning volume compression',
+                detail='Building volume {name}.'.format(name=tpart.name))
 
     with tempfile.NamedTemporaryFile(mode='rwb') as tf:
         compression_p = popen_sp([LZOP_BIN, '--stdout'],
@@ -184,27 +188,34 @@ def do_partition_put(backup_s3_prefix, tpart, rate_limit):
             .format(s3_url=s3_url))
 
         def put_volume_exception_processor(exc_tup, exc_processor_cxt):
+            def standard_detail_message(prefix=''):
+                return (prefix + '  There have been {n} attempts to send the '
+                        'volume {name} so far.'.format(n=exc_processor_cxt,
+                                                       name=tpart.name))
+
+            def increment_context(exc_processor_cxt):
+                return ((exc_processor_cxt is None and 1) or
+                        exc_processor_cxt + 1)
+
             typ, value, tb = exc_tup
 
-            # Screen for certain kinds of known-errors to retry
-            # from
+            if exc_processor_cxt is None:
+                exc_processor_cxt = increment_context(exc_processor_cxt)
+
+            # Screen for certain kinds of known-errors to retry from
             if issubclass(typ, socket.error):
-                # This branch is for conditions that are retry-able.
-                if value[0] == errno.ECONNRESET:
-                    # "Connection reset by peer"
-                    if exc_processor_cxt is None:
-                        exc_processor_cxt = 1
-                    else:
-                        exc_processor_cxt += 1
+                socketmsg = value[1] if isinstance(value, tuple) else value
 
-                    logger.info(
-                        msg='Connection reset detected, retrying send',
-                        detail=('There have been {n} attempts to send the '
-                                'volume {name} so far.'
-                                .format(n=exc_processor_cxt,
-                                        name=tpart.name)))
+                logger.info(msg='Retrying send because of a socket error',
+                            detail=standard_detail_message(
+                        "The socket error's message is '{0}'.".format(socketmsg)))
+                return increment_context(exc_processor_cxt)
+            elif (issubclass(typ, boto.exception.S3ResponseError) and
+                  value.error_code == 'RequestTimeTooSkewed'):
+                logger.info(msg='Retrying send because of a Request Skew time',
+                            detail=standard_detail_message())
 
-                    return exc_processor_cxt
+                return increment_context(exc_processor_cxt)
             else:
                 # This type of error is unrecognized as a
                 # retry-able condition, so propagate it, original
@@ -221,12 +232,12 @@ def do_partition_put(backup_s3_prefix, tpart, rate_limit):
         k = put_file_helper()
         clock_finish = time.clock()
 
-        kib_per_second = compute_kib_per_second(clock_start, clock_finish,
-                                                k.size)
+        kib_per_second = format_kib_per_second(clock_start, clock_finish,
+                                               k.size)
         logger.info(
             msg='finish uploading a base backup volume',
             detail=('Uploading to "{s3_url}" complete at '
-                    '{kib_per_second:02g}KiB/s. ')
+                    '{kib_per_second}KiB/s. ')
             .format(s3_url=s3_url, kib_per_second=kib_per_second))
 
 
@@ -265,12 +276,12 @@ def do_lzop_s3_put(s3_url, local_path):
         k = uri_put_file(s3_url, tf)
         clock_finish = time.clock()
 
-        kib_per_second = compute_kib_per_second(clock_start, clock_finish,
-                                                k.size)
+        kib_per_second = format_kib_per_second(clock_start, clock_finish,
+                                               k.size)
         logger.info(
             msg='completed archiving to a file ',
             detail=('Archiving to "{s3_url}" complete at '
-                    '{kib_per_second:02g}KiB/s. ')
+                    '{kib_per_second}KiB/s. ')
             .format(s3_url=s3_url, kib_per_second=kib_per_second))
 
 

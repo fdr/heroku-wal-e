@@ -1,3 +1,9 @@
+wal-e (0.5.8+0.5.9c1-1heroku~lucid~ppa0) lucid; urgency=low
+
+  * New upstream release candidate
+
+ -- Daniel Farina <daniel@heroku.com>  Thu, 10 Nov 2011 15:14:48 -0800
+
 wal-e (0.5.7+0.5.8c4-1heroku~lucid~ppa0) lucid; urgency=low
 
   * New upstream release candidate
