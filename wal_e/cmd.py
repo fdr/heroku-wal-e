@@ -104,6 +104,35 @@ def external_program_check(
     return None
 
 
+def keyring_check(fingerprint, gpg_bin=GPG_BIN):
+    """
+    Check for the existence of a keychain and key by fingerprint
+
+    gpg_bin is passed as a keyword argument to enable testing of the
+    failure case.
+
+    """
+
+    try:
+        with open(os.devnull, 'w') as nullf:
+            proc = popen_sp([gpg_bin, '--fingerprint', fingerprint],
+                            stdout=nullf, stderr=nullf, stdin=nullf)
+            proc.wait()
+    except EnvironmentError:
+        # TODO: As more keychains are supported (even if it's 'gpgsm'
+        # vs vanilla 'gpg') this doesn't necessarily signify an error,
+        # but rather to fall back to looking at other supported
+        # keyrings.
+        raise UserException(msg='could not run GnuPG aka gpg')
+    else:
+        if proc.returncode == 2:
+            raise UserException(
+                msg=('could not locate encryption key fingerprint in any '
+                     'keychain'),
+                detail=('The encryption key that cannot be found is "{0}".'
+                        .format(fingerprint)))
+            
+
 def extract_segment(text_with_extractable_segment):
     from wal_e.storage.s3_storage import BASE_BACKUP_REGEXP
     from wal_e.storage.s3_storage import SegmentNumber
@@ -135,7 +164,7 @@ def main(argv=None):
                         'Can also be defined via environment variable '
                         'WALE_S3_PREFIX')
 
-    parser.add_argument('--gpg-key-id',
+    parser.add_argument('--key-',
                         help='GPG key ID to encrypt to. (Also needed when decrypting.)  '
                         'Can also be defined via environment variable '
                         'WALE_GPG_KEY_ID')
@@ -276,15 +305,16 @@ def main(argv=None):
     else:
         aws_access_key_id = args.aws_access_key_id
 
-    # This will be None if we're not encrypting
-    gpg_key_id = args.gpg_key_id or os.getenv('WALE_GPG_KEY_ID')
+    # 'None' if encryption is not to be performed
+    fingerprint = args.key_fingerprint or os.getenv('WALE_FINGERPRINT')
 
-    backup_cxt = s3_operator.S3Backup(aws_access_key_id, secret_key, s3_prefix, gpg_key_id)
+    backup_cxt = s3_operator.S3Backup(aws_access_key_id, secret_key, s3_prefix,
+                                      fingerprint)
 
     subcommand = args.subcommand
 
-    if gpg_key_id is not None:
-        external_program_check([GPG_BIN])
+    if fingerprint is not None:
+        keyring_check(fingerprint)
 
     try:
         if subcommand == 'backup-fetch':

@@ -350,14 +350,16 @@ involved.
 Encryption
 ----------
 
-To encrypt backups as well as compress them, first generate a key
-pair using ``gpg --gen-key``. You don't need the private key on the
-machine to back up, but you will need it to restore. It'll need to
-have no passphrase.
+WAL-E can use GnuPG_ to manage keys and provide encryption of
+archives.  One can choose the public key to use for encryption by use
+of its fingerprint by passing the fingerprint via the environment
+variable ``WALE_FINGERPRINT`` or the ``--fingerprint`` command line
+option.
 
-Once this is done, just set the ``WALE_GPG_KEY_ID`` environment
-variable or the ``--gpg-key-id`` command line option to the ID of
-the secret key for backup and restore commands.
+For more information about generating keys, one can read `a section`
+<http://www.gnupg.org/gph/en/manual.html#AEN26> of GnuPG_\ 's manual.
+
+.. _GnuPG: http://www.gnupg.org/
 
 
 Controlling the I/O of a Base Backup
