@@ -200,6 +200,15 @@ def main(argv=None):
     wal_fetch_parser.add_argument('WAL_DESTINATION',
                                   help='Path to download the WAL segment to')
 
+    # copy operator section
+    timeline_copy_parser = subparsers.add_parser(
+        'timeline-copy', help='Copy timeline content from one context to another')
+    timeline_copy_parser.add_argument(
+        'DESTINATION', help='Storage URI to copy timelines to')
+    timeline_copy_parser.add_argument(
+        'TLI', nargs='+',
+        help='A timeline identifier, such as "7" or "00000007"')
+
     # delete subparser section
     delete_parser = subparsers.add_parser(
         'delete', help=('operators to destroy specified data in S3'))
@@ -308,6 +317,8 @@ def main(argv=None):
         elif subcommand == 'wal-push':
             external_program_check([LZOP_BIN])
             backup_cxt.wal_s3_archive(args.WAL_SEGMENT)
+        elif subcommand == 'timeline-copy':
+            pass
         elif subcommand == 'delete':
             # Set up pruning precedence, optimizing for *not* deleting data
             #
