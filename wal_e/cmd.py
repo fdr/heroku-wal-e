@@ -200,6 +200,20 @@ def main(argv=None):
     wal_fetch_parser.add_argument('WAL_DESTINATION',
                                   help='Path to download the WAL segment to')
 
+    # copy operator section
+    lineage_copy_parser = subparsers.add_parser(
+        'lineage-copy', help='Copy lineage content from one context to another')
+    lineage_copy_parser.add_argument(
+        'DESTINATION', help='Storage URI to copy lineages to')
+    lineage_copy_parser.add_argument(
+        'AFTER_INCLUSIVE',
+        help=('A base backup name or WAL segment number marks the beginning of '
+              'the lineage'))
+    lineage_copy_parser.add_argument(
+        'END_INCLUSIVE',
+        help=('A WAL segment number that is equal to or beyond the WAL '
+              'segment required to apply a desired transaction'))
+
     # delete subparser section
     delete_parser = subparsers.add_parser(
         'delete', help=('operators to destroy specified data in S3'))
@@ -308,6 +322,11 @@ def main(argv=None):
         elif subcommand == 'wal-push':
             external_program_check([LZOP_BIN])
             backup_cxt.wal_s3_archive(args.WAL_SEGMENT)
+        elif subcommand == 'lineage-copy':
+            destination_backup_cxt = s3_operator.S3Backup(
+                aws_access_key_id, secret_key, args.destination)
+            destination_backup_cxt.copy_from(backup_cxt, args.after_inclusive,
+                                             args.end_inclusive)
         elif subcommand == 'delete':
             # Set up pruning precedence, optimizing for *not* deleting data
             #
