@@ -27,15 +27,42 @@ COMPLETE_BASE_BACKUP_REGEXP = (
 
 VOLUME_REGEXP = (r'part_(\d+)\.tar\.lzo')
 
-# A representation of a log number and segment, naive of timeline.
-# This number always increases, even when diverging into two
-# timelines, so it's useful for conservative garbage collection.
-class SegmentNumber(collections.namedtuple('SegmentNumber', ['log', 'seg'])):
+# A representation of a timeline, log number and segment number.
+class SegmentNumber(collections.namedtuple('SegmentNumber',
+                                           ['tli', 'log', 'seg'])):
 
-    @property
-    def as_an_integer(self):
+    def __new__(cls, *args, **kwargs):
+        instance = super(SegmentNumber, cls).__new__(cls, *args, **kwargs)
+        instance._check()
+        return instance
+
+    def _check(self):
+        assert self.tli is None or (len(self.tli) == 8 and
+                                    int(self.tli, 16) > 0)
         assert len(self.log) == 8
         assert len(self.seg) == 8
+
+    @property
+    def as_an_integer_with_timeline(self):
+        """
+        Convert this segment into an integer
+
+        This number is useful for determining how to copy lineages
+        between contexts.
+        """
+        self._check()
+        return int(self.tli + self.log + self.seg, 16)
+
+
+    @property
+    def as_an_integer_without_timeline(self):
+        """
+        Convert this segment into an integer stripped of timeline
+
+        This number always increases even when diverging into two
+        timelines, so it's useful for conservative garbage collection.
+        """
+        self._check()
         return int(self.log + self.seg, 16)
 
 # Exhaustively enumerates all possible metadata about a backup.  These
