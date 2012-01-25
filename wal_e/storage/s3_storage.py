@@ -8,11 +8,12 @@ structure and metadata for an S3-backed WAL-E prefix.
 """
 
 import collections
+import re
 
 import wal_e.exception
+import wal_e.storage.s3_storage
 
 from urlparse import urlparse
-
 
 CURRENT_VERSION = '005'
 
@@ -26,6 +27,7 @@ COMPLETE_BASE_BACKUP_REGEXP = (
     r'_(?P<offset>[0-9A-F]{8})_backup_stop_sentinel\.json')
 
 VOLUME_REGEXP = (r'part_(\d+)\.tar\.lzo')
+
 
 # A representation of a timeline, log number and segment number.
 class SegmentNumber(collections.namedtuple('SegmentNumber',
@@ -53,7 +55,6 @@ class SegmentNumber(collections.namedtuple('SegmentNumber',
         self._check()
         return int(self.tli + self.log + self.seg, 16)
 
-
     @property
     def as_an_integer_without_timeline(self):
         """
@@ -79,6 +80,10 @@ BackupInfo = collections.namedtuple('BackupInfo',
                                      'wal_segment_offset_backup_start',
                                      'wal_segment_backup_stop',
                                      'wal_segment_offset_backup_stop'])
+
+
+class ParseError(Exception):
+    pass
 
 
 class StorageLayout(object):
@@ -176,3 +181,85 @@ class StorageLayout(object):
 
     def bucket_name(self):
         return self._url_tup.netloc
+
+    def parse(self, url):
+        submitted_url_tup = urlparse(url)
+
+        if (submitted_url_tup.scheme != self._url_tup.scheme or
+            submitted_url_tup.netloc != self._url_tup.netloc or
+            not submitted_url_tup.path.startswith(self._url_tup.path)):
+            raise ValueError('Passed URI is not contained within this '
+                             'Storage Context.')
+
+        def groupdict_to_backup_info(regexp, s):
+            match = re.match(regexp, s)
+
+            if match is None:
+                raise ParseError
+            else:
+                matchdict = match.groupdict()
+
+                return wal_e.storage.s3_storage.BackupInfo(
+                    name=s,
+                    wal_segment_backup_start=matchdict['filename'],
+                    wal_segment_offset_backup_start=matchdict['offset'],
+
+                    # Fields that are not present in nor necessary to
+                    # to format key strings, but must be specified to
+                    # make namedtuple not raise an error.
+                    last_modified=None,
+                    expanded_size_bytes=None,
+                    wal_segment_backup_stop=None,
+                    wal_segment_offset_backup_stop=None)
+
+        # "Cliques" are different levels of keys that occur in the
+        # storage layout, as determined by the number of slashes that
+        # are not at the beginning nor end of the string (otherwise
+        # it's a meta-key, which more closely resembles a 'directory')
+        cliques = [self.basebackups().count('/')]
+        for i in xrange(2):
+            cliques.append(cliques[-1] + 1)
+        cliques = tuple(cliques)
+
+        basebackup_metakey_name = self.basebackup_directory
+
+        relative_path = submitted_url_tup.path[len(self._url_tup.path):]
+        key_parts = relative_path.strip('/').split('/')
+        key_depth = len(key_parts)
+
+        # These conditionals have the following pattern:
+        #
+        # The first level contains the test against the clique of the
+        # key beikng considered.
+        #
+        # The second level rechecks the key against the possible
+        # prefixes that can contain keys of a given clique.
+        if key_depth == cliques[0]:
+            if submitted_url_tup.path.startswith('/' + self.basebackups()):
+                return (self.basebackup_sentinel,
+                        (groupdict_to_backup_info(
+                            COMPLETE_BASE_BACKUP_REGEXP,
+                            key_parts[-1]),))
+            elif submitted_url_tup.path.startswith('/' + self.wal_directory()):
+                return (self.wal_path, (key_parts[-1],))
+            else:
+                raise ParseError
+        elif key_depth == cliques[1]:
+            bi = groupdict_to_backup_info(BASE_BACKUP_REGEXP, key_parts[-2])
+            if (submitted_url_tup.path ==
+                '/' + self.basebackup_extended_version(bi)):
+                return (self.basebackup_extended_version, (bi,))
+            else:
+                raise ParseError
+        elif key_depth == cliques[2]:
+            bi = groupdict_to_backup_info(BASE_BACKUP_REGEXP, key_parts[-3])
+            if submitted_url_tup.path.startswith(
+                '/' + self.basebackup_tar_partition_directory(bi)):
+                return (self.basebackup_tar_partition,
+                        (groupdict_to_backup_info(
+                            BASE_BACKUP_REGEXP, key_parts[-3]), key_parts[-1]))
+            else:
+                raise ParseError
+        else:
+            assert key_depth < clique_one and key_depth > clique_three
+            raise ParseError

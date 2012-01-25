@@ -55,3 +55,4 @@ class UserCritical(UserException):
     def __init__(self, *args, **kwargs):
         UserException.__init__(self, *args, **kwargs)
         self.severity = CRITICAL
+

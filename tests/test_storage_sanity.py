@@ -1,3 +1,4 @@
+import inspect
 import pytest
 
 from wal_e.storage.s3_storage import *
@@ -55,3 +56,36 @@ def test_backup_sentinel(sl, bi):
 def test_extended_version(sl, bi):
     extended_version_location = sl.basebackup_extended_version(bi)
     assert extended_version_location.split('/')[-1] == 'extended_version.txt'
+
+
+def test_parse_identity_test(sl, bi):
+    parse_identity_methods = [m for m in
+                              inspect.getmembers(sl, inspect.ismethod)
+                              if not
+                              (m[0].startswith('_') or
+                               m[0] in ('parse', 'bucket_name'))]
+
+    for name, method in parse_identity_methods:
+        call_args = []
+        argspec = inspect.getargspec(method)
+
+        for argname in argspec.args:
+            if argname == 'self':
+                pass
+            elif argname == 'backup_info':
+                call_args.append(bi)
+            elif argname == 'wal_file_name':
+                call_args.append(bi.wal_segment_backup_start)
+            elif argname == 'part_name':
+                call_args.append('part_000')
+            else:
+                assert False, argname
+
+        formed_path = 's3://foo/' + apply(method, call_args)
+
+        if formed_path.endswith('/'):
+            continue
+
+        storage_op, args = sl.parse(formed_path)
+
+        assert formed_path == 's3://foo/' + apply(storage_op, args)
