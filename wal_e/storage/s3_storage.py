@@ -145,8 +145,12 @@ class StorageLayout(object):
 
     def basebackup_sentinel(self, backup_info):
         self._error_on_unexpected_version()
-        return (self.basebackup_directory(backup_info) +
-                '_backup_stop_sentinel.json')
+
+        with_delimiter = self.basebackup_directory(backup_info)
+        assert with_delimiter[-1] == '/'
+        without_delimiter = with_delimiter[:-1]
+
+        return without_delimiter + '_backup_stop_sentinel.json'
 
     def basebackup_tar_partition_directory(self, backup_info):
         self._error_on_unexpected_version()
