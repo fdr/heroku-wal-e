@@ -50,3 +50,8 @@ def test_backup_sentinel(sl, bi):
     sentinel_location = sl.basebackup_sentinel(bi)
     assert (sentinel_location.split('/')[-1] ==
             'base_000000000000000000000000_11111111_backup_stop_sentinel.json')
+
+
+def test_extended_version(sl, bi):
+    extended_version_location = sl.basebackup_extended_version(bi)
+    assert extended_version_location.split('/')[-1] == 'extended_version.txt'

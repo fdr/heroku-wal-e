@@ -157,6 +157,11 @@ class StorageLayout(object):
         return (self.basebackup_directory(backup_info) +
                 'tar_partitions/')
 
+    def basebackup_extended_version(self, backup_info):
+        self._error_on_unexpected_version()
+        return (self.basebackup_directory(backup_info) +
+                'extended_version.txt')
+
     def basebackup_tar_partition(self, backup_info, part_name):
         self._error_on_unexpected_version()
         return (self.basebackup_tar_partition_directory(backup_info) +
