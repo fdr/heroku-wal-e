@@ -202,7 +202,7 @@ def main(argv=None):
 
     # copy operator section
     lineage_copy_parser = subparsers.add_parser(
-        'lineage-copy', help='Copy lineage content from one context to another')
+        'lineage-copy', help='copy lineage content from one context to another')
     lineage_copy_parser.add_argument(
         'DESTINATION', help='Storage URI to copy lineages to')
     lineage_copy_parser.add_argument(
