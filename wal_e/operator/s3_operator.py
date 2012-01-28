@@ -61,6 +61,10 @@ class S3Backup(object):
                             self.aws_secret_access_key,
                             calling_format=OrdinaryCallingFormat())
 
+    @property
+    def layout(self):
+        self.s3_prefix
+
     def backup_list(self, query, detail):
         """
         Lists base backups and basic information about them
@@ -422,3 +426,11 @@ class S3Backup(object):
         s3_conn = self.new_connection()
         delete_cxt = s3_worker.DeleteFromContext(s3_conn, layout, dry_run)
         delete_cxt.delete_before(segment_info)
+
+    def copy_from(self, other_context, after_segment, end_segment):
+        self_layout = s3_storage.StorageLayout(self.s3_prefix)
+        other_layout = s3_storage.StorageLayout(other_context.s3_prefix)
+
+        s3_conn = self.new_connection()
+
+        s3_worker.
