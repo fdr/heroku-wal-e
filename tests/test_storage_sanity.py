@@ -58,6 +58,13 @@ def test_extended_version(sl, bi):
     assert extended_version_location.split('/')[-1] == 'extended_version.txt'
 
 
+def test_segment_number_parsing():
+    sn = SegmentNumber.from_string('000000010000000200000003')
+    assert sn.tli == '00000001'
+    assert sn.log == '00000002'
+    assert sn.seg == '00000003'
+
+
 def test_parse_identity_test(sl, bi):
     parse_identity_methods = [m for m in
                               inspect.getmembers(sl, inspect.ismethod)

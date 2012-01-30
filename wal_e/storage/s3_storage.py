@@ -38,6 +38,11 @@ class SegmentNumber(collections.namedtuple('SegmentNumber',
         instance._check()
         return instance
 
+    @classmethod
+    def from_string(cls, s):
+        d = re.match(SEGMENT_REGEXP, s).groupdict()
+        return cls(tli=d['tli'], log=d['log'], seg=d['seg'])
+
     def _check(self):
         assert self.tli is None or (len(self.tli) == 8 and
                                     int(self.tli, 16) > 0)
