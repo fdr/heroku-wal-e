@@ -6,14 +6,11 @@ with the intention that they are used in forked worker processes.
 
 """
 import boto
-import errno
 import functools
 import gevent
 import json
 import logging
-import os
 import re
-import signal
 import socket
 import subprocess
 import sys
@@ -26,7 +23,7 @@ import wal_e.storage.s3_storage as s3_storage
 import wal_e.log_help as log_help
 
 from wal_e.exception import UserException, UserCritical
-from wal_e.piper import pipe, pipe_wait, popen_sp, PIPE
+from wal_e.piper import popen_sp, PIPE
 
 
 logger = log_help.WalELogger(__name__, level=logging.INFO)
@@ -152,6 +149,15 @@ def retry_with_count(side_effect_func):
 
 
 def uri_put_file(s3_uri, fp, content_encoding=None):
+    # Per Boto 2.2.2, which will only read from the current file
+    # position to the end.  This manifests as successfully uploaded
+    # *empty* keys in S3 instead of the intended data because of how
+    # tempfiles are used (create, fill, submit to boto).
+    #
+    # It is presumed it is the caller's responsibility to rewind the
+    # file position, and since the whole program was written with this
+    # in mind, assert it as a precondition for using this procedure.
+    assert fp.tell() == 0
 
     # XXX: disable validation as a kludge to get around use of
     # upper-case bucket names.
@@ -224,7 +230,6 @@ def do_partition_put(backup_s3_prefix, tpart, rate_limit):
                                                        name=tpart.name))
 
             typ, value, tb = exc_tup
-            del tb
             del exc_tup
 
             # Screen for certain kinds of known-errors to retry from
@@ -245,10 +250,11 @@ def do_partition_put(backup_s3_prefix, tpart, rate_limit):
                 # This type of error is unrecognized as a retry-able
                 # condition, so propagate it, original stacktrace and
                 # all.
-                raise exc_tup[0], exc_tup[1], exc_tup[2]
+                raise typ, value, tb
 
         @retry(retry_with_count(log_volume_failures_on_error))
         def put_file_helper():
+            tf.seek(0)
             return uri_put_file(s3_url, tf)
 
         # Actually do work, retrying if necessary, and timing how long
@@ -298,6 +304,7 @@ def do_lzop_s3_put(s3_url, local_path):
                             .format(**locals())))
 
         clock_start = time.clock()
+        tf.seek(0)
         k = uri_put_file(s3_url, tf)
         clock_finish = time.clock()
 

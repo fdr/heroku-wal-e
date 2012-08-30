@@ -4,7 +4,7 @@ Section: python
 Priority: optional
 Build-Depends: python-setuptools (>= 0.6b3), debhelper (>= 7.4.3),
  python-support (>= 0.8.4), libevent-dev (>= 1.4.13-stable)
-Standards-Version: 3.8.4
+Standards-Version: 3.9.3
 
 Package: python-wal-e
 Architecture: all
