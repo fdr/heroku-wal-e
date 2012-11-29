@@ -43,7 +43,15 @@ class PyTest(Command):
         import subprocess
 
         try:
+            # Just to trigger exception
+            import xdist
+
             retcode = subprocess.call('py.test')
+        except ImportError:
+            print >>sys.stderr, (
+                'Could not find parallel test runner, consider '
+                '"pip install pytest-xdist".')
+            retcode = 1
         except EnvironmentError, e:
             if e.errno == errno.ENOENT:
                 print >>sys.stderr, ('Could not find test runner, consider '
