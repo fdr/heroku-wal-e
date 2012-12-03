@@ -9,6 +9,10 @@ from distutils.cmd import Command
 # setuptools borrowed and adapted from GitPython.
 try:
     from setuptools import setup, find_packages
+
+    # Silence pyflakes
+    assert setup
+    assert find_packages
 except ImportError:
     from ez_setup import use_setuptools
     use_setuptools()
@@ -45,6 +49,9 @@ class PyTest(Command):
         try:
             # Just to trigger exception
             import xdist
+
+            # Silence pyflakes
+            assert xdist
 
             retcode = subprocess.call('py.test')
         except ImportError:
