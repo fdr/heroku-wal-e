@@ -14,7 +14,7 @@ import wal_e.exception
 from urlparse import urlparse
 
 
-CURRENT_VERSION = 'dev-version'
+CURRENT_VERSION = '005'
 
 SEGMENT_REGEXP = (r'(?P<filename>(?P<tli>[0-9A-F]{8,8})(?P<log>[0-9A-F]{8,8})'
                   '(?P<seg>[0-9A-F]{8,8}))')
